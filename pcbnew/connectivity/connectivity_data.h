@@ -26,6 +26,7 @@
 #include <core/typeinfo.h>
 #include <core/spinlock.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -95,6 +96,9 @@ public:
      * Build the connectivity database for the board aBoard.
      */
     bool Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter = nullptr );
+
+    /** Incremental additions can populate the graph before the entire loaded board has been indexed. */
+    bool HasBoardConnectivity() const { return m_hasBoardConnectivity.load(); }
 
     /**
      * Build the connectivity database for a set of items aItems.
@@ -252,6 +256,15 @@ public:
     const std::vector<BOARD_CONNECTED_ITEM*>
     GetNetItems( int aNetCode, const std::vector<KICAD_T>& aTypes ) const;
 
+    /** Collect several nets in one scan. Buckets follow the input order, with repeats left empty. */
+    std::vector<std::vector<BOARD_CONNECTED_ITEM*>>
+    GetNetItems( const std::vector<int>& aNetCodes, const std::vector<KICAD_T>& aTypes ) const;
+
+    /** Query a newly loaded or indexed board. Returns false if the board is busy. */
+    bool TryGetNetItems( BOARD& aBoard, const std::vector<int>& aNetCodes,
+                         const std::vector<KICAD_T>& aTypes,
+                         std::vector<std::vector<BOARD_CONNECTED_ITEM*>>& aItems );
+
     void BlockRatsnestItems( const std::vector<BOARD_ITEM*>& aItems );
 
     std::shared_ptr<CN_CONNECTIVITY_ALGO> GetConnectivityAlgo() const { return m_connAlgo; }
@@ -293,6 +306,10 @@ private:
 
 private:
     std::shared_ptr<CN_CONNECTIVITY_ALGO> m_connAlgo;
+    std::atomic<bool>                     m_hasBoardConnectivity{ false };
+    // Board revision and layer set for which the saved net assignments were verified.
+    std::atomic<int>                      m_netQueryTimestamp{ -1 };
+    LSET                                  m_netQueryLayers;
 
     std::shared_ptr<FROM_TO_CACHE>  m_fromToCache;
     std::vector<RN_DYNAMIC_LINE>    m_dynamicRatsnest;

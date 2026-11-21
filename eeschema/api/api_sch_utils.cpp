@@ -156,11 +156,7 @@ bool PackSymbol( kiapi::schematic::types::SchematicSymbolInstance* aOutput, cons
         return false;
     }
 
-    google::protobuf::Any any;
-    aInput->Serialize( any );
-
-    if( !any.UnpackTo( aOutput ) )
-        return false;
+    aInput->Serialize( *aOutput );
 
     PackSheetPath( *aOutput->mutable_path(), aPath );
 
@@ -495,11 +491,7 @@ bool ApplySymbolInstance( kiapi::common::commands::ItemStatus* aStatus, SCH_SYMB
 bool PackSheet( kiapi::schematic::types::SheetSymbol* aOutput, const SCH_SHEET* aInput,
                 const SCH_SHEET_PATH& aPath )
 {
-    google::protobuf::Any any;
-    aInput->Serialize( any );
-
-    if( !any.UnpackTo( aOutput ) )
-        return false;
+    aInput->Serialize( *aOutput );
 
     PackSheetPath( *aOutput->mutable_path(), aPath );
 

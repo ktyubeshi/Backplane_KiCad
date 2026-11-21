@@ -18,6 +18,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <unordered_map>
+#include <unordered_set>
 #include <backplane_embed.h>
 #include <backplane_embed_proto.h>
 #include <backplane_comment.h>
@@ -988,6 +990,107 @@ void API_HANDLER_SCH::filterValidSchTypes( std::set<KICAD_T>& aTypeList )
 }
 
 
+namespace
+{
+SCH_SHEET_LIST requestedSheets( const SCHEMATIC& aSchematic, const types::DocumentSpecifier& aDocument )
+{
+    SCH_SHEET_LIST sheets = aSchematic.Hierarchy();
+
+    if( aDocument.has_sheet_path() )
+    {
+        if( auto path = sheets.GetSheetPathByKIIDPath( UnpackSheetPath( aDocument.sheet_path() ) ) )
+        {
+            sheets.clear();
+            sheets.push_back( std::move( *path ) );
+        }
+    }
+
+    return sheets;
+}
+
+
+void visitSchematicItemsById( const SCH_SHEET_LIST& aSheets,
+                              const google::protobuf::RepeatedPtrField<types::KIID>& aIds,
+                              const auto& aVisitor )
+{
+    if( aIds.empty() )
+        return;
+
+    if( aIds.size() == 1 )
+    {
+        SCH_SHEET_PATH path;
+
+        if( SCH_ITEM* item = aSheets.ResolveItem( KIID( aIds[0].value() ), &path, true ) )
+            aVisitor( item, path );
+
+        return;
+    }
+
+    struct LOCATION
+    {
+        SCH_ITEM*             item = nullptr;
+        const SCH_SHEET_PATH* path = nullptr;
+    };
+
+    std::unordered_map<KIID, LOCATION> matches;
+    std::vector<const LOCATION*> order;
+    matches.reserve( aIds.size() );
+    order.reserve( aIds.size() );
+
+    for( const types::KIID& id : aIds )
+        order.push_back( &matches[KIID( id.value() )] );
+
+    size_t remaining = matches.size();
+    std::vector<SCH_ITEM*> children;
+    std::unordered_set<const SCH_SCREEN*> visited;
+
+    for( const SCH_SHEET_PATH& path : aSheets )
+    {
+        const SCH_SCREEN* screen = path.LastScreen();
+
+        // All instances share the same item IDs. ResolveItem returns the first matching path.
+        if( !screen || !visited.insert( screen ).second )
+            continue;
+
+        auto match = [&]( SCH_ITEM* item )
+        {
+            auto it = matches.find( item->m_Uuid );
+
+            if( it != matches.end() && !it->second.item )
+            {
+                it->second = { item, &path };
+                --remaining;
+            }
+        };
+
+        for( SCH_ITEM* item : screen->Items() )
+        {
+            match( item );
+            children.clear();
+            item->RunOnChildren( [&]( SCH_ITEM* child ) { children.push_back( child ); },
+                                 RECURSE_MODE::NO_RECURSE );
+
+            // ResolveItem chooses the first matching parent, then the last matching child
+            // of that parent if an older document contains colliding child IDs.
+            for( auto it = children.rbegin(); it != children.rend(); ++it )
+                match( *it );
+
+            if( remaining == 0 )
+                break;
+        }
+
+        if( remaining == 0 )
+            break;
+    }
+
+    for( const LOCATION* location : order )
+    {
+        if( location->item )
+            aVisitor( location->item, *location->path );
+    }
+}
+}
+
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_CONTEXT<GetItems>& aCtx )
 {
     if( HANDLER_RESULT<std::optional<KIID>> valid = validateItemHeaderDocument( aCtx.Request.header() );
@@ -1019,50 +1122,29 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
         return tl::unexpected( e );
     }
 
-    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-    std::optional<SCH_SHEET_PATH> pathFilter;
+    const SCH_SHEET_LIST sheets = requestedSheets( *schematic(), aCtx.Request.header().document() );
+    std::map<KICAD_T, std::vector<std::pair<SCH_ITEM*, const SCH_SHEET_PATH*>>> itemMap;
+    for( KICAD_T type : typesRequested )
+        itemMap.emplace( type, decltype( itemMap )::mapped_type{} );
 
-    if( aCtx.Request.header().document().has_sheet_path() )
+    for( const SCH_SHEET_PATH& path : sheets )
     {
-        KIID_PATH kp = UnpackSheetPath( aCtx.Request.header().document().sheet_path() );
-        pathFilter = hierarchy.GetSheetPathByKIIDPath( kp );
-    }
+        const SCH_SCREEN* screen = path.LastScreen();
+        if( !screen )
+            continue;
 
-    std::map<KICAD_T, std::vector<std::pair<EDA_ITEM*, SCH_SHEET_PATH>>> itemMap;
-
-    auto processScreen =
-        [&]( const SCH_SHEET_PATH& aPath )
+        auto collect = [&]( SCH_ITEM* item )
         {
-            const SCH_SCREEN* aScreen = aPath.LastScreen();
-
-            if( !aScreen )
-                return;
-
-            for( SCH_ITEM* aItem : aScreen->Items() )
-            {
-                itemMap[ aItem->Type() ].emplace_back( aItem, aPath );
-
-                // Group members live in the screen's rtree as well as in the group
-                if( aItem->Type() == SCH_GROUP_T )
-                    continue;
-
-                aItem->RunOnChildren(
-                        [&]( SCH_ITEM* aChild )
-                        {
-                            itemMap[ aChild->Type() ].emplace_back( aChild, aPath );
-                        },
-                        RECURSE_MODE::NO_RECURSE );
-            }
+            if( auto it = itemMap.find( item->Type() ); it != itemMap.end() )
+                it->second.emplace_back( item, &path );
         };
 
-    if( pathFilter )
-    {
-        processScreen( *pathFilter );
-    }
-    else
-    {
-        for( const SCH_SHEET_PATH& path : hierarchy )
-            processScreen( path );
+        for( SCH_ITEM* item : screen->Items() )
+        {
+            collect( item );
+            if( item->Type() != SCH_GROUP_T )
+                item->RunOnChildren( collect, RECURSE_MODE::NO_RECURSE );
+        }
     }
 
     GetItemsResponse response;
@@ -1072,7 +1154,7 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
     {
         for( const auto& [item, itemPath] : itemMap[type] )
         {
-            if( packSchItem( any, static_cast<SCH_ITEM*>( item ), itemPath ) )
+            if( packSchItem( any, item, *itemPath ) )
                 response.mutable_items()->Add( std::move( any ) );
         }
     }
@@ -1094,63 +1176,14 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HAND
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
-    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-    std::optional<SCH_SHEET_PATH> pathFilter;
-
-    if( aCtx.Request.header().document().has_sheet_path() )
-    {
-        KIID_PATH kp = UnpackSheetPath( aCtx.Request.header().document().sheet_path() );
-        pathFilter = hierarchy.GetSheetPathByKIIDPath( kp );
-    }
-
     GetItemsResponse response;
-    SCH_ITEM* item = nullptr;
-    google::protobuf::Any any;
-
-    for( const types::KIID& idProto : aCtx.Request.items() )
-    {
-        KIID id( idProto.value() );
-
-        SCH_SHEET_PATH itemPath;
-
-        if( pathFilter )
-        {
-            item = pathFilter->ResolveItem( id );
-            itemPath = *pathFilter;
-        }
-        else
-        {
-            item = hierarchy.ResolveItem( id, &itemPath, true );
-        }
-
-        if( !item || !s_allowedTypes.contains( item->Type() ) )
-            continue;
-
-        if( item->Type() == SCH_SYMBOL_T )
-        {
-            kiapi::schematic::types::SchematicSymbolInstance symbol;
-
-            if( !PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( item ), itemPath ) )
-                continue;
-
-            any.PackFrom( symbol );
-        }
-        else if( item->Type() == SCH_SHEET_T )
-        {
-            kiapi::schematic::types::SheetSymbol sheet;
-
-            if( !PackSheet( &sheet, static_cast<SCH_SHEET*>( item ), itemPath ) )
-                continue;
-
-            any.PackFrom( sheet );
-        }
-        else
-        {
-            item->Serialize( any );
-        }
-
-        response.mutable_items()->Add( std::move( any ) );
-    }
+    visitSchematicItemsById( requestedSheets( *schematic(), aCtx.Request.header().document() ),
+            aCtx.Request.items(), [&]( SCH_ITEM* item, const SCH_SHEET_PATH& path )
+            {
+                google::protobuf::Any packed;
+                if( s_allowedTypes.contains( item->Type() ) && packSchItem( packed, item, path ) )
+                    response.mutable_items()->Add( std::move( packed ) );
+            } );
 
     if( response.items().empty() )
     {
@@ -1249,17 +1282,15 @@ API_HANDLER_SCH::handleAddToSelection( const HANDLER_CONTEXT<AddToSelection>& aC
 
     EDA_ITEMS toAdd;
 
-    for( const types::KIID& id : aCtx.Request.items() )
-    {
-        SCH_SHEET_PATH itemPath;
+    if( !schematic()->HasHierarchy() )
+        schematic()->RefreshHierarchy();
 
-        // Selection only operates on the currently-displayed sheet; off-sheet items are skipped
-        if( std::optional<SCH_ITEM*> item = getItemById( KIID( id.value() ), &itemPath );
-            item && itemPath == current )
-        {
-            toAdd.push_back( *item );
-        }
-    }
+    visitSchematicItemsById( schematic()->Hierarchy(), aCtx.Request.items(),
+            [&]( SCH_ITEM* item, const SCH_SHEET_PATH& path )
+            {
+                if( path == current )
+                    toAdd.push_back( item );
+            } );
 
     tool->AddItemsToSel( &toAdd );
     frame()->Refresh();
@@ -1299,16 +1330,15 @@ API_HANDLER_SCH::handleRemoveFromSelection( const HANDLER_CONTEXT<RemoveFromSele
 
     EDA_ITEMS toRemove;
 
-    for( const types::KIID& id : aCtx.Request.items() )
-    {
-        SCH_SHEET_PATH itemPath;
+    if( !schematic()->HasHierarchy() )
+        schematic()->RefreshHierarchy();
 
-        if( std::optional<SCH_ITEM*> item = getItemById( KIID( id.value() ), &itemPath );
-            item && itemPath == current )
-        {
-            toRemove.push_back( *item );
-        }
-    }
+    visitSchematicItemsById( schematic()->Hierarchy(), aCtx.Request.items(),
+            [&]( SCH_ITEM* item, const SCH_SHEET_PATH& path )
+            {
+                if( path == current )
+                    toRemove.push_back( item );
+            } );
 
     tool->RemoveItemsFromSel( &toRemove );
     frame()->Refresh();

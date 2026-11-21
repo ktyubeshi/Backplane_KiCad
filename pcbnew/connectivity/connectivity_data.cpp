@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <future>
 #include <initializer_list>
+#include <unordered_map>
 
 #include <connectivity/connectivity_data.h>
 #include <connectivity/connectivity_algo.h>
@@ -77,6 +78,7 @@ CONNECTIVITY_DATA::~CONNECTIVITY_DATA()
 
 bool CONNECTIVITY_DATA::Add( BOARD_ITEM* aItem )
 {
+    m_netQueryTimestamp = -1;
     m_connAlgo->Add( aItem );
     return true;
 }
@@ -84,6 +86,7 @@ bool CONNECTIVITY_DATA::Add( BOARD_ITEM* aItem )
 
 bool CONNECTIVITY_DATA::Remove( BOARD_ITEM* aItem )
 {
+    m_netQueryTimestamp = -1;
     m_connAlgo->Remove( aItem );
     return true;
 }
@@ -91,6 +94,7 @@ bool CONNECTIVITY_DATA::Remove( BOARD_ITEM* aItem )
 
 bool CONNECTIVITY_DATA::Update( BOARD_ITEM* aItem )
 {
+    m_netQueryTimestamp = -1;
     m_connAlgo->Remove( aItem );
     m_connAlgo->Add( aItem );
     return true;
@@ -99,12 +103,14 @@ bool CONNECTIVITY_DATA::Update( BOARD_ITEM* aItem )
 
 bool CONNECTIVITY_DATA::Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter )
 {
-    aBoard->CacheTriangulation( aReporter );
-
     std::unique_lock<KISPINLOCK> lock( m_lock, std::try_to_lock );
 
     if( !lock )
         return false;
+
+    m_hasBoardConnectivity = false;
+    m_netQueryTimestamp = -1;
+    aBoard->CacheTriangulation( aReporter );
 
     if( aReporter )
     {
@@ -138,6 +144,7 @@ bool CONNECTIVITY_DATA::Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter )
         aReporter->KeepRefreshing( false );
     }
 
+    m_hasBoardConnectivity = true;
     return true;
 }
 
@@ -159,6 +166,8 @@ void CONNECTIVITY_DATA::Build( std::shared_ptr<CONNECTIVITY_DATA>& aGlobalConnec
     if( !lock )
         return;
 
+    m_hasBoardConnectivity = false;
+    m_netQueryTimestamp = -1;
     m_connAlgo.reset( new CN_CONNECTIVITY_ALGO( this ) );
     m_connAlgo->LocalBuild( aGlobalConnectivity, aLocalItems );
 
@@ -168,6 +177,7 @@ void CONNECTIVITY_DATA::Build( std::shared_ptr<CONNECTIVITY_DATA>& aGlobalConnec
 
 void CONNECTIVITY_DATA::Move( const VECTOR2I& aDelta )
 {
+    m_netQueryTimestamp = -1;
     m_connAlgo->ForEachAnchor( [&aDelta]( CN_ANCHOR& anchor )
                                {
                                    anchor.Move( aDelta );
@@ -607,30 +617,148 @@ CONNECTIVITY_DATA::GetConnectedItems( const BOARD_CONNECTED_ITEM *aItem, int aFl
 }
 
 
+static std::bitset<MAX_STRUCT_TYPE_ID> netItemTypes( const std::vector<KICAD_T>& aTypes )
+{
+    std::bitset<MAX_STRUCT_TYPE_ID> typeBits;
+
+    for( KICAD_T scanType : aTypes )
+    {
+        wxASSERT( scanType < MAX_STRUCT_TYPE_ID );
+        typeBits.set( scanType );
+    }
+
+    return typeBits;
+}
+
+
+static void visitNetItems( const CN_CONNECTIVITY_ALGO& aConnectivity,
+                           const std::bitset<MAX_STRUCT_TYPE_ID>& aTypes, const auto& aVisitor )
+{
+    aConnectivity.ForEachItem(
+            [&]( CN_ITEM& aItem )
+            {
+                if( aItem.Valid() && aTypes[aItem.Parent()->Type()] )
+                    aVisitor( aItem.Parent() );
+            } );
+}
+
+
+static void sortUniqueNetItems( std::vector<BOARD_CONNECTED_ITEM*>& aItems )
+{
+    std::sort( aItems.begin(), aItems.end() );
+    aItems.erase( std::unique( aItems.begin(), aItems.end() ), aItems.end() );
+}
+
+
 const std::vector<BOARD_CONNECTED_ITEM*>
 CONNECTIVITY_DATA::GetNetItems( int aNetCode, const std::vector<KICAD_T>& aTypes ) const
 {
     std::vector<BOARD_CONNECTED_ITEM*> items;
     items.reserve( 32 );
-
-    std::bitset<MAX_STRUCT_TYPE_ID> type_bits;
-
-    for( KICAD_T scanType : aTypes )
+    visitNetItems( *m_connAlgo, netItemTypes( aTypes ), [&]( BOARD_CONNECTED_ITEM* item )
     {
-        wxASSERT( scanType < MAX_STRUCT_TYPE_ID );
-        type_bits.set( scanType );
+        if( item->GetNetCode() == aNetCode )
+            items.push_back( item );
+    } );
+    sortUniqueNetItems( items );
+    return items;
+}
+
+
+static std::vector<std::vector<BOARD_CONNECTED_ITEM*>>
+collectNetItems( const CN_CONNECTIVITY_ALGO& aConnectivity, BOARD* aUnindexedBoard,
+                 const std::vector<int>& aNetCodes, const std::vector<KICAD_T>& aTypes )
+{
+    std::vector<std::vector<BOARD_CONNECTED_ITEM*>> buckets( aNetCodes.size() );
+
+    if( aNetCodes.empty() )
+        return buckets;
+
+    std::unordered_map<int, size_t> bucketByNet;
+    bucketByNet.reserve( aNetCodes.size() );
+
+    for( size_t i = 0; i < aNetCodes.size(); ++i )
+        bucketByNet.try_emplace( aNetCodes[i], i );
+
+    auto collect = [&]( BOARD_CONNECTED_ITEM* item )
+    {
+        if( auto it = bucketByNet.find( item->GetNetCode() ); it != bucketByNet.end() )
+            buckets[it->second].push_back( item );
+    };
+
+    const auto types = netItemTypes( aTypes );
+
+    if( aUnindexedBoard )
+    {
+        CN_CONNECTIVITY_ALGO::VisitBoardNetItems( *aUnindexedBoard, [&]( BOARD_CONNECTED_ITEM* item )
+        {
+            if( types[item->Type()] )
+                collect( item );
+        } );
+    }
+    else
+    {
+        visitNetItems( aConnectivity, types, collect );
     }
 
-    m_connAlgo->ForEachItem(
-            [&]( CN_ITEM& aItem )
-            {
-                if( aItem.Valid() && ( aItem.Net() == aNetCode ) && type_bits[aItem.Parent()->Type()] )
-                    items.push_back( aItem.Parent() );
-            } );
+    for( auto& items : buckets )
+        sortUniqueNetItems( items );
 
-    std::sort( items.begin(), items.end() );
-    items.erase( std::unique( items.begin(), items.end() ), items.end() );
-    return items;
+    return buckets;
+}
+
+
+std::vector<std::vector<BOARD_CONNECTED_ITEM*>>
+CONNECTIVITY_DATA::GetNetItems( const std::vector<int>& aNetCodes, const std::vector<KICAD_T>& aTypes ) const
+{
+    return collectNetItems( *m_connAlgo, nullptr, aNetCodes, aTypes );
+}
+
+
+bool CONNECTIVITY_DATA::TryGetNetItems( BOARD& aBoard, const std::vector<int>& aNetCodes,
+                                        const std::vector<KICAD_T>& aTypes,
+                                        std::vector<std::vector<BOARD_CONNECTED_ITEM*>>& aItems )
+{
+    aItems.clear();
+
+    if( aNetCodes.empty() )
+        return true;
+
+    std::unique_lock<KISPINLOCK> lock( m_lock, std::try_to_lock );
+
+    if( !lock )
+        return false;
+
+    const int timestamp = aBoard.GetTimeStamp();
+    const LSET layers = aBoard.GetEnabledLayers();
+
+    if( !HasBoardConnectivity() && ( m_netQueryTimestamp != timestamp || m_netQueryLayers != layers ) )
+    {
+        // Use a separate graph for the check. Physical queries keep using the board's
+        // complete graph, including zone islands, contacts and ratsnest exclusions.
+        CONNECTIVITY_DATA probe;
+        const bool assignedNets = probe.m_connAlgo->CanUseAssignedNets( aBoard );
+
+        if( timestamp != aBoard.GetTimeStamp() || layers != aBoard.GetEnabledLayers() )
+            return false;
+
+        if( assignedNets )
+        {
+            m_netQueryLayers = layers;
+            m_netQueryTimestamp = timestamp;
+        }
+        else
+        {
+            m_netQueryTimestamp = -1;
+            lock.unlock();
+
+            if( !aBoard.BuildConnectivity() || !lock.try_lock() )
+                return false;
+        }
+    }
+
+    aItems = collectNetItems( *m_connAlgo, HasBoardConnectivity() ? nullptr : &aBoard, aNetCodes, aTypes );
+    return true;
 }
 
 

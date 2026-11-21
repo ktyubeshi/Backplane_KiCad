@@ -4,6 +4,11 @@ Current upstream pin: `f4c75f251385065755b948fce210e5a029bcee5e` (2026-10-31, Ki
 Original port base: upstream master `fe761fb867` (2026-10-14). The initial triage below is retained as history.
 Old base: tag 10.0.6 `caf7377e9c`. 18 commits on backplane/10.0.6 plus 4 on origin/main.
 
+Local IPC performance port from `ktyubeshi/Backplane_KiCad@17c109344b1b5307b02b50d09a15563c13f24c57`
+via `4257fbd3aa68a1a3a8828bdb097479ec0b7f5981` onto
+`release/bp.13.4@65bb96f6b7ce5e0c003008865bdbe6dcb0750099`. The headless
+event pump wakes on a queued request while retaining its parent and idle checks.
+
 Classes: **DROP-UPSTREAM** = master has it; **DROP-OBSOLETE** = only meaningful on 10.0.6;
 **PORT** = still needed; **PKG** = release packaging, port with changes.
 

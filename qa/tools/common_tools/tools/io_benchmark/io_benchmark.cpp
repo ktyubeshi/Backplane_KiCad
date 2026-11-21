@@ -19,6 +19,7 @@
 
 #include <wx/wx.h>
 #include <richio.h>
+#include <io/kicad/kicad_file_reader.h>
 
 #include <chrono>
 #include <ios>
@@ -307,6 +308,7 @@ static std::vector<BENCHMARK> benchmarkList =
     { 'f', bench_fstream, "std::fstream" },
     { 'F', bench_fstream_reuse, "std::fstream, reused" },
     { 'r', bench_line_reader<FILE_LINE_READER>, "RichIO FILE_L_R" },
+    { 'k', bench_line_reader<KICAD_FILE_READER>, "Native S-expression file reader" },
     { 'R', bench_line_reader_reuse<FILE_LINE_READER>, "RichIO FILE_L_R, reused" },
     { 'n', bench_line_reader<IFSTREAM_LINE_READER>, "std::ifstream L_R" },
     { 'N', bench_line_reader_reuse<IFSTREAM_LINE_READER>, "std::ifstream L_R, reused" },

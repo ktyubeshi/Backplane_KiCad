@@ -131,6 +131,10 @@ def main():
                         return result
 
                     request(base.Ping(), Empty)
+                    connection.send(b"\x80")
+                    malformed = envelope.ApiResponse.FromString(connection.recv())
+                    assert malformed.status.status == envelope.AS_BAD_REQUEST, malformed.status
+                    assert malformed.header.kicad_token == token
                     if os.name == "nt":
                         assert "KiCad API server listening at " in (root / "server.log").read_text(), \
                             "Windows readiness output was not flushed while the server was running"

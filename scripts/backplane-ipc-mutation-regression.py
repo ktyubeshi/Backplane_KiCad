@@ -274,6 +274,23 @@ def main():
                 assert len(items) == 1 and items[0].status.code == editor.ISC_OK, result
                 return unpack(items[0].item)
 
+            if kind == types.DOCTYPE_SCHEMATIC:
+                def pin_alternates(symbol):
+                    pins = {}
+                    for child in symbol.definition.items:
+                        pin = sch.SchematicPin()
+                        if child.item.Unpack(pin):
+                            pins[pin.id.value] = pin.active_alternate
+                    return pins
+
+                # U1 in the kitchen-sink fixture uses named pin alternates.
+                symbol = fetch("45f8b93d-708a-47ab-a23e-854a49d5dc44")
+                selections = pin_alternates(symbol)
+                assert any(selections.values()), "Fixture needs a placed pin with an active alternate"
+                updated = transaction(editor.CMA_DROP, lambda: write_item(symbol, False))
+                assert pin_alternates(updated) == selections, "Updating the symbol changed its pin selections"
+                assert pin_alternates(fetch(symbol.id.value)) == selections
+
             def assert_children_preserved(expected_item, actual_item, key):
                 """Check nested schematic data that has no independent CRUD ID."""
                 if expected_item.DESCRIPTOR.name not in ("SchematicTable", "Table"):

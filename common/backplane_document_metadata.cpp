@@ -75,7 +75,7 @@ void BACKPLANE_DOCUMENT_METADATA::Load( const wxString& aDocumentPath )
 
         if( version == 1 )
         {
-            m_items = data.at( "items" );
+            m_items = std::move( data.at( "items" ) );
 
             if( !m_items.is_object() )
                 THROW_IO_ERROR( "Backplane companion items must be an object" );
@@ -95,7 +95,7 @@ void BACKPLANE_DOCUMENT_METADATA::Load( const wxString& aDocumentPath )
         }
         else
         {
-            m_extensions = data.at( "extensions" );
+            m_extensions = std::move( data.at( "extensions" ) );
 
             if( !m_extensions.is_object() )
                 THROW_IO_ERROR( "Backplane companion extensions must be an object" );

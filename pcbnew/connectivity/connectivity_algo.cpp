@@ -311,7 +311,7 @@ void CN_CONNECTIVITY_ALGO::searchConnections()
 
                     if( m_progressReporter )
                         m_progressReporter->AdvanceProgress();
-                } );
+                }, tp.get_thread_count() * 4 );
 
         // Here we balance returns with a 250ms timeout to allow UI updating
         while( !returns.wait_for( std::chrono::milliseconds( 250 ) ) )
@@ -515,6 +515,213 @@ CN_CONNECTIVITY_ALGO::SearchClusters( CLUSTER_SEARCH_MODE aMode, bool aExcludeZo
 }
 
 
+static void visitNonZoneCopper( BOARD& aBoard, const auto& aVisit, const auto& aAdvance )
+{
+    for( PCB_TRACK* track : aBoard.Tracks() )
+    {
+        if( track->IsOnCopperLayer() )
+            aVisit( track );
+
+        aAdvance();
+    }
+
+    for( FOOTPRINT* fp : aBoard.Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
+        {
+            if( !( fp->GetAttributes() & FP_JUST_ADDED ) && pad->IsOnCopperLayer() )
+                aVisit( pad );
+
+            aAdvance();
+        }
+    }
+
+    for( BOARD_ITEM* drawing : aBoard.Drawings() )
+    {
+        if( drawing->Type() == PCB_SHAPE_T && IsCopperLayer( drawing->GetLayer() ) )
+            aVisit( static_cast<PCB_SHAPE*>( drawing ) );
+
+        aAdvance();
+    }
+}
+
+
+static void visitFilledCopperLayers( const BOARD& aBoard, ZONE& aZone, const auto& aVisit )
+{
+    LSET layers = aBoard.GetEnabledLayers() & aZone.GetLayerSet() & LSET::AllCuMask();
+
+    layers.RunOnLayers( [&]( PCB_LAYER_ID layer )
+    {
+        const auto fill = aZone.GetFilledPolysList( layer );
+
+        if( fill->OutlineCount() )
+            aVisit( layer, *fill );
+    } );
+}
+
+
+static bool viaCanTouchZoneLayer( const PCB_VIA& aVia, PCB_LAYER_ID aLayer )
+{
+    return aVia.IsOnLayer( aLayer ) && !aVia.IsBackdrilledOrPostMachined( aLayer )
+           && !( aVia.ConditionallyFlashed( aLayer )
+                 && aVia.GetZoneLayerOverride( aLayer ) == ZLO_FORCE_NO_ZONE_CONNECTION );
+}
+
+
+static bool viaTouchesZone( const PCB_VIA& aVia, const CN_ZONE_LAYER& aIsland )
+{
+    const PCB_LAYER_ID layer = aIsland.GetLayer();
+
+    return viaCanTouchZoneLayer( aVia, layer )
+           && ( aIsland.ContainsPoint( aVia.GetPosition() )
+                || aIsland.Collide( aVia.GetEffectiveShape( layer, FLASHING::ALWAYS_FLASHED ).get() ) );
+}
+
+
+struct ISOLATED_VIA
+{
+    PCB_VIA* via;
+    BOX2I    bounds;
+    bool     mayChangeNet = false;
+};
+
+
+static bool isolatedViasKeepNets( BOARD& aBoard, std::vector<ISOLATED_VIA>& aVias )
+{
+    if( aVias.empty() )
+        return true;
+
+    auto visitFills = [&]( const auto& visit )
+    {
+        for( ZONE* zone : aBoard.Zones() )
+        {
+            visitFilledCopperLayers( aBoard, *zone,
+                    [&]( PCB_LAYER_ID layer, const SHAPE_POLY_SET& fill )
+                    {
+                        visit( *zone, layer, fill );
+                    } );
+        }
+    };
+
+    visitFills( [&]( ZONE& zone, PCB_LAYER_ID layer, const SHAPE_POLY_SET& fill )
+    {
+        const BOX2I bounds = fill.BBox();
+        const BOX2I zoneBounds = zone.GetBoundingBox();
+
+        for( ISOLATED_VIA& entry : aVias )
+        {
+            if( zone.GetNetCode() != entry.via->GetNetCode() && zoneBounds.Intersects( entry.bounds )
+                && bounds.Intersects( entry.bounds ) && viaCanTouchZoneLayer( *entry.via, layer ) )
+                entry.mayChangeNet = true;
+        }
+    } );
+
+    auto mayChange = []( const ISOLATED_VIA& entry ) { return entry.mayChangeNet; };
+
+    if( std::ranges::none_of( aVias, mayChange ) )
+        return true;
+
+    // A zone-only via keeps its assigned net if it touches that net on any layer.
+    // Build the native contact index only for fills that can prove such a contact.
+    visitFills( [&]( ZONE& zone, PCB_LAYER_ID layer, const SHAPE_POLY_SET& fill )
+    {
+        const BOX2I bounds = fill.BBox();
+        // The physical graph indexes the current zone outline, even for a stale saved fill.
+        const BOX2I zoneBounds = zone.GetBoundingBox();
+        std::vector<ISOLATED_VIA*> candidates;
+
+        for( ISOLATED_VIA& entry : aVias )
+        {
+            if( entry.mayChangeNet && zone.GetNetCode() == entry.via->GetNetCode()
+                && zoneBounds.Intersects( entry.bounds ) && bounds.Intersects( entry.bounds )
+                && viaCanTouchZoneLayer( *entry.via, layer ) )
+                candidates.push_back( &entry );
+        }
+
+        if( candidates.empty() )
+            return;
+
+        if( !zone.IsTeardropArea() )
+            zone.CacheTriangulation( layer );
+
+        for( int i = 0; i < fill.OutlineCount(); ++i )
+        {
+            CN_ZONE_LAYER island( &zone, layer, i );
+            island.BuildIndexes();
+
+            for( ISOLATED_VIA* entry : candidates )
+            {
+                if( entry->mayChangeNet && viaTouchesZone( *entry->via, island ) )
+                    entry->mayChangeNet = false;
+            }
+        }
+    } );
+
+    return std::ranges::none_of( aVias, mayChange );
+}
+
+
+void CN_CONNECTIVITY_ALGO::VisitBoardNetItems(
+        BOARD& aBoard, const std::function<void( BOARD_CONNECTED_ITEM* )>& aVisit )
+{
+    visitNonZoneCopper( aBoard, aVisit, [] {} );
+
+    for( ZONE* zone : aBoard.Zones() )
+    {
+        bool hasCopper = false;
+        visitFilledCopperLayers( aBoard, *zone,
+                                 [&]( PCB_LAYER_ID, const SHAPE_POLY_SET& ) { hasCopper = true; } );
+
+        if( hasCopper )
+            aVisit( zone );
+    }
+}
+
+
+bool CN_CONNECTIVITY_ALGO::CanUseAssignedNets( BOARD& aBoard )
+{
+    visitNonZoneCopper( aBoard, [&]( BOARD_CONNECTED_ITEM* item ) { Add( item ); }, [] {} );
+    updateJumperPads();
+
+    // Propagation excludes zones from clusters. Conflicting positive assignments or a
+    // mutable unassigned item need the full build, which chooses the authoritative net.
+    for( const auto& cluster : SearchClusters( CSM_PROPAGATE ) )
+    {
+        if( !cluster->IsConflicting() && cluster->HasValidNet() )
+        {
+            bool hasMutableItem = false;
+            bool hasOtherAssignment = false;
+
+            for( const CN_ITEM* item : *cluster )
+            {
+                hasMutableItem |= item->CanChangeNet();
+
+                if( ( item->CanChangeNet() || item->Net() > 0 )
+                    && item->Net() != cluster->OriginNet() )
+                    hasOtherAssignment = true;
+            }
+
+            if( hasMutableItem && hasOtherAssignment )
+                return false;
+        }
+    }
+
+    std::vector<ISOLATED_VIA> isolatedVias;
+
+    for( CN_ITEM* item : m_itemList )
+    {
+        if( item->Parent()->Type() == PCB_VIA_T && item->CanChangeNet()
+            && item->ConnectedItems().empty() )
+        {
+            auto* via = static_cast<PCB_VIA*>( item->Parent() );
+            isolatedVias.push_back( { via, via->GetBoundingBox() } );
+        }
+    }
+
+    return isolatedViasKeepNets( aBoard, isolatedVias );
+}
+
+
 void CN_CONNECTIVITY_ALGO::Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter )
 {
     // Nothing queries the index until searchConnections(), so index the board in one packed
@@ -534,13 +741,10 @@ void CN_CONNECTIVITY_ALGO::Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter )
 
             // Don't check for connections on layers that only exist in the zone but
             // were disabled in the board
-            BOARD* board = zone->GetBoard();
-            LSET layerset = board->GetEnabledLayers() & zone->GetLayerSet() & LSET::AllCuMask();
-
-            layerset.RunOnLayers(
-                    [&]( PCB_LAYER_ID layer )
+            visitFilledCopperLayers( *aBoard, *zone,
+                    [&]( PCB_LAYER_ID layer, const SHAPE_POLY_SET& fill )
                     {
-                        for( int j = 0; j < zone->GetFilledPolysList( layer )->OutlineCount(); j++ )
+                        for( int j = 0; j < fill.OutlineCount(); ++j )
                             zitems.push_back( new CN_ZONE_LAYER( zone, layer, j ) );
                     } );
         }
@@ -622,31 +826,8 @@ void CN_CONNECTIVITY_ALGO::Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter )
         report( ++ii );
     }
 
-    for( PCB_TRACK* tv : aBoard->Tracks() )
-    {
-        Add( tv );
-        report( ++ii );
-    }
-
-    for( FOOTPRINT* footprint : aBoard->Footprints() )
-    {
-        for( PAD* pad : footprint->Pads() )
-        {
-            Add( pad );
-            report( ++ii );
-        }
-    }
-
-    for( BOARD_ITEM* drawing : aBoard->Drawings() )
-    {
-        if( PCB_SHAPE* shape = dynamic_cast<PCB_SHAPE*>( drawing ) )
-        {
-            if( shape->IsOnCopperLayer() )
-                Add( shape );
-        }
-
-        report( ++ii );
-    }
+    visitNonZoneCopper( *aBoard, [&]( BOARD_CONNECTED_ITEM* item ) { Add( item ); },
+                        [&] { report( ++ii ); } );
 
     if( aReporter )
     {
@@ -907,17 +1088,10 @@ void CN_VISITOR::checkZoneItemConnection( CN_ZONE_LAYER* aZoneLayer, CN_ITEM* aI
     }
     else if( item->Type() == PCB_VIA_T )
     {
-        PCB_VIA* via = static_cast<PCB_VIA*>( item );
+        if( viaTouchesZone( *static_cast<PCB_VIA*>( item ), *aZoneLayer ) )
+            connect();
 
-        if( via->ConditionallyFlashed( layer )
-            && via->GetZoneLayerOverride( layer ) == ZLO_FORCE_NO_ZONE_CONNECTION )
-        {
-            return;
-        }
-
-        // Don't connect zones to vias on backdrilled or post-machined layers
-        if( via->IsBackdrilledOrPostMachined( layer ) )
-            return;
+        return;
     }
 
     for( int i = 0; i < aItem->AnchorCount(); ++i )
@@ -929,10 +1103,9 @@ void CN_VISITOR::checkZoneItemConnection( CN_ZONE_LAYER* aZoneLayer, CN_ITEM* aI
         }
     }
 
-    if( item->Type() == PCB_VIA_T || item->Type() == PCB_PAD_T )
+    if( item->Type() == PCB_PAD_T )
     {
-        // As long as the pad/via crosses the zone layer, check for the full effective shape
-        // We check for the overlapping layers above
+        // Check the full pad shape when its anchors miss the zone.
         if( aZoneLayer->Collide( item->GetEffectiveShape( layer, FLASHING::ALWAYS_FLASHED ).get() ) )
             connect();
 

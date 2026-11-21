@@ -31,6 +31,8 @@
 class KIID_PATH;
 class SCH_SCREEN;
 class SCH_IO_KICAD_SEXPR_PARSER;
+namespace kiapi::schematic::types { class SheetSymbol; }
+
 class SCH_SHEET_LIST;
 class SCH_SHEET_PIN;
 class SCH_SHEET_PATH;
@@ -53,6 +55,7 @@ public:
                VECTOR2I aSize = VECTOR2I( schIUScale.MilsToIU( MIN_SHEET_WIDTH ),
                                           schIUScale.MilsToIU( MIN_SHEET_HEIGHT ) ) );
 
+    void Serialize( kiapi::schematic::types::SheetSymbol& aSheet ) const;
     void Serialize( google::protobuf::Any& aContainer ) const override;
     bool Deserialize( const google::protobuf::Any& aContainer ) override;
 

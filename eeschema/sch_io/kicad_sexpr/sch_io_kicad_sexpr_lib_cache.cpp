@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <io/kicad/kicad_file_reader.h>
 #include <fmt/format.h>
 #include <set>
 
@@ -74,7 +75,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
         wxLogTrace( traceSchLegacyPlugin, "Loading sexpr symbol library file '%s'",
                     m_libFileName.GetFullPath() );
 
-        FILE_LINE_READER reader( m_libFileName.GetFullPath() );
+        KICAD_FILE_READER reader( m_libFileName.GetFullPath() );
 
         SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
 
@@ -136,7 +137,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
 
                 try
                 {
-                    FILE_LINE_READER reader( sourceFilePath );
+                    KICAD_FILE_READER reader( sourceFilePath );
                     SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
 
                     parser.ParseLib( m_symbols );

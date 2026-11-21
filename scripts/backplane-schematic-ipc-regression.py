@@ -224,6 +224,17 @@ def main(cli, stock_cli=None):
             assert item.Unpack(candidate)
             symbols.append(candidate)
         symbol = next(item for item in symbols if item.reference_field.text.text == "R1")
+        other = next(item for item in symbols if item.id != symbol.id)
+        missing_id = types.KIID(value="00000000-0000-0000-0000-000000000001")
+        batch = api.request(editor.GetItemsById(header=header, items=[
+            other.id, missing_id, symbol.id, other.id]), editor.GetItemsResponse)
+        recovered = []
+        for packed in batch.items:
+            instance = schematic.SchematicSymbolInstance()
+            assert packed.Unpack(instance)
+            recovered.append((instance.id.value, instance.reference_field.text.text))
+        assert recovered == [(item.id.value, item.reference_field.text.text) for item in (other, symbol, other)]
+
         assert symbol.definition.id.entry_name, "symbol library identifier was lost"
         assert symbol.definition.items, "symbol library definition has no graphics or pins"
         selection_baseline = api.request(
@@ -337,6 +348,47 @@ def main(cli, stock_cli=None):
         api.request(project.CloseDocument(document=document), Empty)
         print(f"schematic fidelity passed: {len(netlist.nets)} nets, "
               f"{len(original['children'])} definition items")
+
+        api.request(project.CloseAllDocuments(force=True), Empty)
+        shared = api.copy_project("demos/multichannel", "shared-sheets") / "multichannel_mixer.kicad_sch"
+        document = api.request(project.OpenDocument(type=types.DOCTYPE_SCHEMATIC, path=str(shared)),
+                               project.OpenDocumentResponse).document
+        hierarchy = api.request(commands.GetSchematicHierarchy(document=document),
+                                commands.SchematicHierarchyResponse)
+        channels = hierarchy.top_level_sheets[0].children
+        assert len(channels) >= 2
+        first_id = None
+        references = []
+        for channel in channels[:2]:
+            scoped = types.ItemHeader(document=document)
+            scoped.document.sheet_path.CopyFrom(channel.path)
+            if first_id is None:
+                for packed in api.request(editor.GetItems(header=scoped, types=[enums.KOT_SCH_SYMBOL]),
+                                          editor.GetItemsResponse).items:
+                    instance = schematic.SchematicSymbolInstance()
+                    assert packed.Unpack(instance)
+                    if instance.reference_field.text.text.startswith("R"):
+                        first_id = instance.id
+                        break
+                assert first_id is not None
+            batch = api.request(editor.GetItemsById(header=scoped, items=[first_id, missing_id, first_id]),
+                                editor.GetItemsResponse)
+            assert len(batch.items) == 2
+            for packed in batch.items:
+                instance = schematic.SchematicSymbolInstance()
+                assert packed.Unpack(instance) and instance.id == first_id
+                assert instance.path.path == channel.path.path
+            references.append(instance.reference_field.text.text)
+        assert references[0] != references[1]
+        unscoped = types.ItemHeader(document=document)
+        single = api.request(editor.GetItemsById(header=unscoped, items=[first_id]), editor.GetItemsResponse)
+        batch = api.request(editor.GetItemsById(header=unscoped, items=[first_id, missing_id, first_id]),
+                            editor.GetItemsResponse)
+        first = schematic.SchematicSymbolInstance()
+        assert single.items[0].Unpack(first) and len(batch.items) == 2
+        for packed in batch.items:
+            instance = schematic.SchematicSymbolInstance()
+            assert packed.Unpack(instance) and instance == first
 
 
 if __name__ == "__main__":
