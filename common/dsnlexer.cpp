@@ -567,10 +567,10 @@ L_read:
 
         // skip leading whitespace
         while( cur < limit && isSpace( *cur ) )
-        {
-            curSeparator += *cur;
             ++cur;
-        }
+
+        if( cur != start )
+            curSeparator.append( start, cur - start );
 
         // If the first non-blank character is #, this line is a comment.
         // Comments cannot follow any other token on the same line.
@@ -602,10 +602,10 @@ L_read:
     {
         // skip leading whitespace
         while( cur < limit && isSpace( *cur ) )
-        {
-            curSeparator += *cur;
             ++cur;
-        }
+
+        if( cur != next )
+            curSeparator.append( next, cur - next );
     }
 
     if( cur >= limit )
@@ -642,7 +642,6 @@ L_read:
         // a quoted string, will return DSN_STRING
         if( *cur == stringDelimiter )
         {
-            // copy the token, character by character so we can remove doubled up quotes.
             curText.clear();
 
             ++cur;  // skip over the leading delimiter, which is always " in non-specctraMode
@@ -651,82 +650,86 @@ L_read:
 
             while( head<limit )
             {
-                // ESCAPE SEQUENCES:
-                if( *head =='\\' )
-                {
-                    char    tbuf[8];
-                    char    c;
-                    int     i;
+                const char* literal = head;
 
-                    if( ++head >= limit )
-                        break;  // throw exception at L_unterminated
+                while( head < limit && *head != '"' && *head != '\\' )
+                    ++head;
 
-                    switch( *head++ )
-                    {
-                    case '"':
-                    case '\\':  c = head[-1];   break;
-                    case 'a':   c = '\x07';     break;
-                    case 'b':   c = '\x08';     break;
-                    case 'f':   c = '\x0c';     break;
-                    case 'n':   c = '\n';       break;
-                    case 'r':   c = '\r';       break;
-                    case 't':   c = '\x09';     break;
-                    case 'v':   c = '\x0b';     break;
+                if( head != literal )
+                    curText.append( literal, head - literal );
 
-                    case 'x':   // 1 or 2 byte hex escape sequence
-                        for( i = 0; i < 2; ++i )
-                        {
-                            if( !isxdigit( head[i] ) )
-                                break;
+                if( head == limit )
+                    break;
 
-                            tbuf[i] = head[i];
-                        }
-
-                        tbuf[i] = '\0';
-
-                        if( i > 0 )
-                            c = (char) strtoul( tbuf, nullptr, 16 );
-                        else
-                            c = 'x';   // a goofed hex escape sequence, interpret as 'x'
-
-                        head += i;
-                        break;
-
-                    default:    // 1-3 byte octal escape sequence
-                        --head;
-
-                        for( i=0; i<3; ++i )
-                        {
-                            if( head[i] < '0' || head[i] > '7' )
-                                break;
-
-                            tbuf[i] = head[i];
-                        }
-
-                        tbuf[i] = '\0';
-
-                        if( i > 0 )
-                            c = (char) strtoul( tbuf, nullptr, 8 );
-                        else
-                            c = '\\';   // a goofed octal escape sequence, interpret as '\'
-
-                        head += i;
-                        break;
-                    }
-
-                    curText += c;
-                }
-
-                else if( *head == '"' )     // end of the non-specctraMode DSN_STRING
+                if( *head == '"' )
                 {
                     curTok = DSN_STRING;
-                    ++head;                 // omit this trailing double quote
+                    ++head;                 // omit the trailing double quote
                     goto exit;
                 }
 
-                else
-                    curText += *head++;
+                // Decode the escape following the backslash.
+                char    tbuf[8];
+                char    c;
+                int     i;
 
+                if( ++head >= limit )
+                    break;  // throw exception at L_unterminated
+
+                switch( *head++ )
+                {
+                case '"':
+                case '\\':  c = head[-1];   break;
+                case 'a':   c = '\x07';     break;
+                case 'b':   c = '\x08';     break;
+                case 'f':   c = '\x0c';     break;
+                case 'n':   c = '\n';       break;
+                case 'r':   c = '\r';       break;
+                case 't':   c = '\x09';     break;
+                case 'v':   c = '\x0b';     break;
+
+                case 'x':   // 1 or 2 byte hex escape sequence
+                    for( i = 0; i < 2 && head + i < limit; ++i )
+                    {
+                        if( !isxdigit( static_cast<unsigned char>( head[i] ) ) )
+                            break;
+
+                        tbuf[i] = head[i];
+                    }
+
+                    tbuf[i] = '\0';
+
+                    if( i > 0 )
+                        c = (char) strtoul( tbuf, nullptr, 16 );
+                    else
+                        c = 'x';   // a goofed hex escape sequence, interpret as 'x'
+
+                    head += i;
+                    break;
+
+                default:    // 1-3 byte octal escape sequence
+                    --head;
+
+                    for( i = 0; i < 3 && head + i < limit; ++i )
+                    {
+                        if( head[i] < '0' || head[i] > '7' )
+                            break;
+
+                        tbuf[i] = head[i];
+                    }
+
+                    tbuf[i] = '\0';
+
+                    if( i > 0 )
+                        c = (char) strtoul( tbuf, nullptr, 8 );
+                    else
+                        c = '\\';   // a goofed octal escape sequence, interpret as '\'
+
+                    head += i;
+                    break;
+                }
+
+                curText += c;
             }   // while
 
             // L_unterminated:
@@ -806,13 +809,13 @@ L_read:
     }           // specctraMode
 
     // non-quoted token, read it into curText.
-    curText.clear();
-
     head = cur;
     while( head<limit && !isSep( *head ) )
-        curText += *head++;
+        ++head;
 
-    if( isNumber( curText.c_str(), curText.c_str() + curText.size() ) )
+    curText.assign( cur, head - cur );
+
+    if( isNumber( cur, head ) )
     {
         curTok = DSN_NUMBER;
         goto exit;

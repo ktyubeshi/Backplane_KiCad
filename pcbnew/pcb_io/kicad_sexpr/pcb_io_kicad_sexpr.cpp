@@ -38,6 +38,7 @@
 #include <font/fontconfig.h>
 #include <footprint.h>
 #include <gestfich.h>
+#include <io/kicad/kicad_file_reader.h>
 #include <io/kicad/kicad_io_utils.h>
 #include <kiface_base.h>
 #include <kiplatform/io.h>
@@ -88,7 +89,7 @@ wxString metadataKey( const BOARD_ITEM& aItem, const BOARD_ITEM* aRoot )
 
 void applyMetadata( BOARD_ITEM* aRoot, BACKPLANE_DOCUMENT_METADATA& aMetadata )
 {
-    if( !aRoot )
+    if( !aRoot || aMetadata.IsEmpty() )
         return;
 
     auto apply = [&]( BOARD_ITEM* item )
@@ -272,7 +273,7 @@ void FP_CACHE::Load()
             // Queue I/O errors so only files that fail to parse don't get loaded.
             try
             {
-                FILE_LINE_READER reader( fn.GetFullPath() );
+                KICAD_FILE_READER reader( fn.GetFullPath() );
                 PCB_IO_KICAD_SEXPR_PARSER       parser( &reader, nullptr, nullptr );
 
                 FOOTPRINT* footprint = dynamic_cast<FOOTPRINT*>( parser.Parse() );
@@ -3235,9 +3236,7 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
                                       const std::map<std::string, UTF8>* aProperties,
                                       PROJECT* aProject )
 {
-    FILE_LINE_READER reader( aFileName );
-
-    unsigned lineCount = 0;
+    KICAD_FILE_READER reader( aFileName, m_progressReporter );
 
     // Collect the font substitution warnings (RAII - automatically reset on scope exit)
     FONTCONFIG_REPORTER_SCOPE fontconfigScope( &LOAD_INFO_REPORTER::GetInstance() );
@@ -3248,14 +3247,9 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
 
         if( !m_progressReporter->KeepRefreshing() )
             THROW_IO_ERROR( _( "Open canceled by user." ) );
-
-        while( reader.ReadLine() )
-            lineCount++;
-
-        reader.Rewind();
     }
 
-    BOARD* board = DoLoad( reader, aAppendToMe, aProperties, m_progressReporter, lineCount );
+    BOARD* board = DoLoad( reader, aAppendToMe, aProperties );
 
     // Give the filename to the board if it's new
     if( !aAppendToMe )
@@ -3272,15 +3266,14 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
 
 
 BOARD* PCB_IO_KICAD_SEXPR::DoLoad( LINE_READER& aReader, BOARD* aAppendToMe,
-                                   const std::map<std::string, UTF8>* aProperties,
-                                   PROGRESS_REPORTER* aProgressReporter, unsigned aLineCount)
+                                   const std::map<std::string, UTF8>* aProperties )
 {
     init( aProperties );
 
     bool preserveDestinationStackup =
             aProperties && aProperties->contains( PCB_IO_LOAD_PROPERTIES::APPEND_PRESERVE_DESTINATION_STACKUP );
 
-    PCB_IO_KICAD_SEXPR_PARSER parser( &aReader, aAppendToMe, m_queryUserCallback, aProgressReporter, aLineCount,
+    PCB_IO_KICAD_SEXPR_PARSER parser( &aReader, aAppendToMe, m_queryUserCallback,
                                       preserveDestinationStackup );
     BOARD* board;
 

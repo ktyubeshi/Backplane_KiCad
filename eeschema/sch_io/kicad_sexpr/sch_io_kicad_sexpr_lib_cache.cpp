@@ -39,6 +39,7 @@
 #include "sch_io_kicad_sexpr_parser.h"
 #include <string_utils.h>
 #include <trace_helpers.h>
+#include <io/kicad/kicad_file_reader.h>
 #include <io/kicad/kicad_io_utils.h>
 
 
@@ -65,6 +66,9 @@ void applyLibraryMetadata( const wxString& aPath, const std::vector<LIB_SYMBOL*>
 {
     BACKPLANE_DOCUMENT_METADATA metadata;
     metadata.Load( aPath );
+
+    if( metadata.IsEmpty() )
+        return;
 
     for( const LIB_SYMBOL* symbol : aSymbols )
     {
@@ -144,7 +148,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
         wxLogTrace( traceSchLegacyPlugin, "Loading sexpr symbol library file '%s'",
                     m_libFileName.GetFullPath() );
 
-        FILE_LINE_READER reader( m_libFileName.GetFullPath() );
+        KICAD_FILE_READER reader( m_libFileName.GetFullPath() );
 
         SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
 
@@ -213,7 +217,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
 
                 try
                 {
-                    FILE_LINE_READER reader( sourceFilePath );
+                    KICAD_FILE_READER reader( sourceFilePath );
                     SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
 
                     parser.ParseLib( m_symbols );

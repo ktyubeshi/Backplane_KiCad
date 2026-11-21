@@ -43,7 +43,6 @@
 #include <string_any_map.h>
 #include <padstack.h>
 
-#include <chrono>
 #include <map>
 #include <unordered_map>
 
@@ -77,7 +76,6 @@ class PCB_BARCODE;
 class FP_3DMODEL;
 class SHAPE_LINE_CHAIN;
 struct LAYER;
-class PROGRESS_REPORTER;
 class TEARDROP_PARAMETERS;
 
 
@@ -95,15 +93,11 @@ public:
 
     PCB_IO_KICAD_SEXPR_PARSER( LINE_READER* aReader, BOARD* aAppendToMe,
                                std::function<bool( wxString, int, wxString, wxString )> aQueryUserCallback,
-                               PROGRESS_REPORTER* aProgressReporter = nullptr, unsigned aLineCount = 0,
                                bool aPreserveDestinationStackup = false ) :
             PCB_LEXER( aReader ),
             m_board( aAppendToMe ),
             m_appendToExisting( aAppendToMe != nullptr ),
             m_preserveDestinationStackup( aPreserveDestinationStackup ),
-            m_progressReporter( aProgressReporter ),
-            m_lastProgressTime( std::chrono::steady_clock::now() ),
-            m_lineCount( aLineCount ),
             m_queryUserCallback( std::move( aQueryUserCallback ) )
     {
         init();
@@ -200,8 +194,6 @@ private:
      * is encountered.
      */
     void init();
-
-    void checkpoint();
 
     /**
      * Create a mapping from the (short-lived) bug where layer names were translated.
@@ -435,15 +427,6 @@ private:
      */
     void resolveGroups( BOARD_ITEM* aParent );
 
-    ///< The type of progress bar timeout
-    using TIMEOUT = std::chrono::milliseconds;
-
-    ///< The clock used for the timestamp (guaranteed to be monotonic).
-    using CLOCK = std::chrono::steady_clock;
-
-    ///< The type of the time stamps.
-    using TIME_PT = std::chrono::time_point<CLOCK>;
-
     BOARD*              m_board;
     LAYER_ID_MAP        m_layerIndices;     ///< map layer name to it's index
     LSET_MAP            m_layerMasks;       ///< map layer names to their masks
@@ -460,10 +443,6 @@ private:
 
     bool                m_showLegacySegmentZoneWarning;
     bool                m_showLegacy5ZoneWarning;
-
-    PROGRESS_REPORTER*  m_progressReporter;  ///< optional; may be nullptr
-    TIME_PT             m_lastProgressTime;  ///< for progress reporting
-    unsigned            m_lineCount;         ///< for progress reporting
 
     std::vector<GROUP_INFO>     m_groupInfos;
     std::vector<GENERATOR_INFO> m_generatorInfos;

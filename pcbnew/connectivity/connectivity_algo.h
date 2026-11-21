@@ -251,6 +251,14 @@ public:
     }
 
     void Build( BOARD* aBoard, PROGRESS_REPORTER* aReporter = nullptr );
+
+    /** On a fresh graph, check whether a full build could change any stored net codes. */
+    bool CanUseAssignedNets( BOARD& aBoard );
+
+    /** Visit the board items represented by a full connectivity build, once per item. */
+    static void VisitBoardNetItems( BOARD& aBoard,
+                                    const std::function<void( BOARD_CONNECTED_ITEM* )>& aVisit );
+
     void LocalBuild( const std::shared_ptr<CONNECTIVITY_DATA>& aGlobalConnectivity,
                      const std::vector<BOARD_ITEM*>& aLocalItems );
 

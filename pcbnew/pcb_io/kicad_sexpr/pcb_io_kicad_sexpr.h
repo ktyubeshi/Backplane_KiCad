@@ -361,8 +361,8 @@ public:
                       const std::map<std::string, UTF8>* aProperties = nullptr,
                       PROJECT* aProject = nullptr ) override;
 
-    BOARD* DoLoad( LINE_READER& aReader, BOARD* aAppendToMe, const std::map<std::string,
-                   UTF8>* aProperties, PROGRESS_REPORTER* aProgressReporter, unsigned aLineCount );
+    BOARD* DoLoad( LINE_READER& aReader, BOARD* aAppendToMe,
+                   const std::map<std::string, UTF8>* aProperties );
 
     void FootprintEnumerate( wxArrayString& aFootprintNames, const wxString& aLibraryPath,
                              bool aBestEfforts, const std::map<std::string,

@@ -86,11 +86,19 @@ SCH_SHEET::SCH_SHEET( EDA_ITEM* aParent, const VECTOR2I& aPos, VECTOR2I aSize ) 
 
 void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
 {
+    kiapi::schematic::types::SheetSymbol sheet;
+    Serialize( sheet );
+    aContainer.PackFrom( sheet );
+}
+
+
+void SCH_SHEET::Serialize( kiapi::schematic::types::SheetSymbol& sheet ) const
+{
     using namespace kiapi::common;
     using namespace kiapi::common::types;
     using namespace kiapi::schematic::types;
 
-    SheetSymbol sheet;
+    sheet.Clear();
 
     sheet.mutable_id()->set_value( m_Uuid.AsStdString() );
     PackVector2( *sheet.mutable_position(), GetPosition(), schIUScale );
@@ -115,22 +123,18 @@ void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
     if( GetBackgroundColor() != COLOR4D::UNSPECIFIED )
         PackColor( *fill->mutable_color(), GetBackgroundColor() );
 
-    google::protobuf::Any any;
-
-    GetField( FIELD_T::SHEET_NAME )->Serialize( any );
-    any.UnpackTo( sheet.mutable_name_field() );
-
-    GetField( FIELD_T::SHEET_FILENAME )->Serialize( any );
-    any.UnpackTo( sheet.mutable_filename_field() );
+    GetField( FIELD_T::SHEET_NAME )->Serialize( *sheet.mutable_name_field() );
+    GetField( FIELD_T::SHEET_FILENAME )->Serialize( *sheet.mutable_filename_field() );
 
     for( const SCH_FIELD& field : GetFields() )
     {
         if( field.IsMandatory() )
             continue;
 
-        field.Serialize( any );
-        any.UnpackTo( sheet.add_user_fields() );
+        field.Serialize( *sheet.add_user_fields() );
     }
+
+    google::protobuf::Any any;
 
     for( const SCH_SHEET_PIN* pin : GetPins() )
     {
@@ -139,20 +143,21 @@ void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
     }
 
     kiapi::common::PackCustomProperties( sheet.mutable_custom_properties(), *this );
-    aContainer.PackFrom( sheet );
 }
 
 
 bool SCH_SHEET::Deserialize( const google::protobuf::Any& aContainer )
 {
+    kiapi::schematic::types::SheetSymbol sheet;
+    return aContainer.UnpackTo( &sheet ) && Deserialize( sheet );
+}
+
+
+bool SCH_SHEET::Deserialize( const kiapi::schematic::types::SheetSymbol& sheet )
+{
     using namespace kiapi::common;
     using namespace kiapi::common::types;
     using namespace kiapi::schematic::types;
-
-    SheetSymbol sheet;
-
-    if( !aContainer.UnpackTo( &sheet ) )
-        return false;
 
     kiapi::common::UnpackCustomProperties( sheet.custom_properties(), *this );
 
@@ -186,21 +191,16 @@ bool SCH_SHEET::Deserialize( const google::protobuf::Any& aContainer )
     m_fields.emplace_back( this, FIELD_T::SHEET_FILENAME,
                            GetDefaultFieldName( FIELD_T::SHEET_FILENAME, DO_TRANSLATE ) );
 
-    google::protobuf::Any any;
-
-    any.PackFrom( sheet.name_field() );
-    GetField( FIELD_T::SHEET_NAME )->Deserialize( any );
-
-    any.PackFrom( sheet.filename_field() );
-    GetField( FIELD_T::SHEET_FILENAME )->Deserialize( any );
+    GetField( FIELD_T::SHEET_NAME )->Deserialize( sheet.name_field() );
+    GetField( FIELD_T::SHEET_FILENAME )->Deserialize( sheet.filename_field() );
 
     for( const auto& field : sheet.user_fields() )
     {
         m_fields.emplace_back( this, FIELD_T::SHEET_USER );
-
-        any.PackFrom( field );
-        m_fields.back().Deserialize( any );
+        m_fields.back().Deserialize( field );
     }
+
+    google::protobuf::Any any;
 
     for( const auto& pinProto : sheet.pins() )
     {

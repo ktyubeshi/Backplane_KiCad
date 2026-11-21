@@ -36,6 +36,11 @@ class SCH_SHEET_PATH;
 class EDA_DRAW_FRAME;
 class SCH_NO_CONNECT;
 
+namespace kiapi::schematic::types
+{
+    class SheetSymbol;
+}
+
 
 #define MIN_SHEET_WIDTH  500    // Units are mils.
 #define MIN_SHEET_HEIGHT 150    // Units are mils.
@@ -53,6 +58,8 @@ public:
 
     void Serialize( google::protobuf::Any& aContainer ) const override;
     bool Deserialize( const google::protobuf::Any& aContainer ) override;
+    void Serialize( kiapi::schematic::types::SheetSymbol& aOutput ) const;
+    bool Deserialize( const kiapi::schematic::types::SheetSymbol& aInput );
 
     /**
      * Copy \a aSheet into a new object.

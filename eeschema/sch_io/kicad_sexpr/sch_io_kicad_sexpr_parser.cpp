@@ -66,7 +66,6 @@
 #include <stroke_params_parser.h>
 #include <template_fieldnames.h>
 #include <trigo.h>
-#include <progress_reporter.h>
 #include <sim/sim_model.h>
 
 
@@ -74,42 +73,15 @@ using namespace TSCHEMATIC_T;
 
 
 SCH_IO_KICAD_SEXPR_PARSER::SCH_IO_KICAD_SEXPR_PARSER( LINE_READER* aLineReader,
-                                                      PROGRESS_REPORTER* aProgressReporter,
-                                                      unsigned aLineCount, SCH_SHEET* aRootSheet,
-                                                      bool aIsAppending ) :
+                                                      SCH_SHEET* aRootSheet, bool aIsAppending ) :
         SCHEMATIC_LEXER( aLineReader ),
         m_requiredVersion( 0 ),
         m_unit( 1 ),
         m_bodyStyle( 1 ),
         m_appending( aIsAppending ),
-        m_progressReporter( aProgressReporter ),
-        m_lineReader( aLineReader ),
-        m_lastProgressLine( 0 ),
-        m_lineCount( aLineCount ),
         m_rootSheet( aRootSheet ),
         m_maxError( ARC_LOW_DEF_MM * schIUScale.IU_PER_MM )
 {
-}
-
-
-void SCH_IO_KICAD_SEXPR_PARSER::checkpoint()
-{
-    if( m_progressReporter )
-    {
-        unsigned progressDelta = std::max( 50u, m_lineCount / 10 );
-        unsigned curLine = m_lineReader->LineNumber();
-
-        if( m_lastProgressLine == 0 || curLine > m_lastProgressLine + progressDelta )
-        {
-            m_progressReporter->SetCurrentProgress( ( (double) curLine )
-                                                            / std::max( 1U, m_lineCount ) );
-
-            if( !m_progressReporter->KeepRefreshing() )
-                THROW_IO_ERROR( _( "Open canceled by user." ) );
-
-            m_lastProgressLine = curLine;
-        }
-    }
 }
 
 
@@ -2772,8 +2744,6 @@ void SCH_IO_KICAD_SEXPR_PARSER::ParseSchematic( SCH_SHEET* aSheet, bool aIsCopya
             Expecting( T_LEFT );
 
         token = NextTok();
-
-        checkpoint();
 
         if( !aIsCopyableOnly && token == T_page && m_requiredVersion <= 20200506 )
             token = T_paper;

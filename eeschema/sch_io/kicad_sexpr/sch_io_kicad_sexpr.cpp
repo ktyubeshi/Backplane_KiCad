@@ -36,6 +36,7 @@
 #include <build_version.h>
 #include <sch_selection.h>
 #include <font/fontconfig.h>
+#include <io/kicad/kicad_file_reader.h>
 #include <io/kicad/kicad_io_utils.h>
 #include <libraries/symbol_library_adapter.h>
 #include <lib_symbol.h>
@@ -114,6 +115,9 @@ static wxString BackplaneLibraryMetadataKey( const SCH_SYMBOL& aSymbol,
 
 static void ApplyBackplaneMetadata( SCH_SCREEN& aScreen, BACKPLANE_DOCUMENT_METADATA& aMetadata )
 {
+    if( aMetadata.IsEmpty() )
+        return;
+
     auto apply = [&]( SCH_ITEM* item )
     {
         if( item->Type() == SCH_MARKER_T )
@@ -457,9 +461,7 @@ void SCH_IO_KICAD_SEXPR::loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, 
 
 void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet )
 {
-    FILE_LINE_READER reader( aFileName );
-
-    size_t lineCount = 0;
+    KICAD_FILE_READER reader( aFileName, m_progressReporter );
 
     if( m_progressReporter )
     {
@@ -467,15 +469,9 @@ void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet 
 
         if( !m_progressReporter->KeepRefreshing() )
             THROW_IO_ERROR( _( "Open canceled by user." ) );
-
-        while( reader.ReadLine() )
-            lineCount++;
-
-        reader.Rewind();
     }
 
-    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, m_progressReporter, lineCount, m_rootSheet,
-                                      m_appending );
+    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, m_rootSheet, m_appending );
 
     parser.ParseSchematic( aSheet );
 

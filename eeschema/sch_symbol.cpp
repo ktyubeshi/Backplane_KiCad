@@ -217,10 +217,18 @@ EDA_ITEM* SCH_SYMBOL::Clone() const
 
 void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
 {
+    kiapi::schematic::types::SchematicSymbolInstance symbol;
+    Serialize( symbol );
+    aContainer.PackFrom( symbol );
+}
+
+
+void SCH_SYMBOL::Serialize( kiapi::schematic::types::SchematicSymbolInstance& symbol ) const
+{
     using namespace kiapi::common;
     using namespace kiapi::schematic::types;
 
-    SchematicSymbolInstance symbol;
+    symbol.Clear();
 
     symbol.mutable_id()->set_value( m_Uuid.AsStdString() );
     PackVector2( *symbol.mutable_position(), GetPosition(), schIUScale );
@@ -242,22 +250,11 @@ void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
     SchematicSymbol* def = symbol.mutable_definition();
     *def->mutable_id() = LibIdToProto( m_lib_id );
 
-    google::protobuf::Any any;
-
-    GetField( FIELD_T::REFERENCE )->Serialize( any );
-    any.UnpackTo( symbol.mutable_reference_field() );
-
-    GetField( FIELD_T::VALUE )->Serialize( any );
-    any.UnpackTo( symbol.mutable_value_field() );
-
-    GetField( FIELD_T::FOOTPRINT )->Serialize( any );
-    any.UnpackTo( symbol.mutable_footprint_field() );
-
-    GetField( FIELD_T::DATASHEET )->Serialize( any );
-    any.UnpackTo( symbol.mutable_datasheet_field() );
-
-    GetField( FIELD_T::DESCRIPTION )->Serialize( any );
-    any.UnpackTo( symbol.mutable_description_field() );
+    GetField( FIELD_T::REFERENCE )->Serialize( *symbol.mutable_reference_field() );
+    GetField( FIELD_T::VALUE )->Serialize( *symbol.mutable_value_field() );
+    GetField( FIELD_T::FOOTPRINT )->Serialize( *symbol.mutable_footprint_field() );
+    GetField( FIELD_T::DATASHEET )->Serialize( *symbol.mutable_datasheet_field() );
+    GetField( FIELD_T::DESCRIPTION )->Serialize( *symbol.mutable_description_field() );
 
     // The five fields above are part of the fixed symbol schema.  User fields
     // live on the placed symbol as well and must travel with the instance;
@@ -268,9 +265,7 @@ void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
         if( field.IsMandatory() )
             continue;
 
-        SchematicField* userField = symbol.add_user_fields();
-        field.Serialize( any );
-        any.UnpackTo( userField );
+        field.Serialize( *symbol.add_user_fields() );
     }
 
     if( m_part )
@@ -278,20 +273,11 @@ void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
         def->set_type( m_part->IsGlobalPower() ? SchematicSymbolType::SST_GLOBAL_POWER
                                                 : m_part->IsLocalPower() ? SchematicSymbolType::SST_LOCAL_POWER
                                                                           : SchematicSymbolType::SST_NORMAL );
-        m_part->GetField( FIELD_T::REFERENCE )->Serialize( any );
-        any.UnpackTo( def->mutable_reference_field() );
-
-        m_part->GetField( FIELD_T::VALUE )->Serialize( any );
-        any.UnpackTo( def->mutable_value_field() );
-
-        m_part->GetField( FIELD_T::FOOTPRINT )->Serialize( any );
-        any.UnpackTo( def->mutable_footprint_field() );
-
-        m_part->GetField( FIELD_T::DATASHEET )->Serialize( any );
-        any.UnpackTo( def->mutable_datasheet_field() );
-
-        m_part->GetField( FIELD_T::DESCRIPTION )->Serialize( any );
-        any.UnpackTo( def->mutable_description_field() );
+        m_part->GetField( FIELD_T::REFERENCE )->Serialize( *def->mutable_reference_field() );
+        m_part->GetField( FIELD_T::VALUE )->Serialize( *def->mutable_value_field() );
+        m_part->GetField( FIELD_T::FOOTPRINT )->Serialize( *def->mutable_footprint_field() );
+        m_part->GetField( FIELD_T::DATASHEET )->Serialize( *def->mutable_datasheet_field() );
+        m_part->GetField( FIELD_T::DESCRIPTION )->Serialize( *def->mutable_description_field() );
 
         for( const SCH_ITEM& drawItem : m_part->GetDrawItems() )
         {
@@ -357,20 +343,21 @@ void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
     PackDistance( *symbol.mutable_pin_name_offset(), GetPinNameOffset(), schIUScale );
 
     kiapi::common::PackCustomProperties( symbol.mutable_custom_properties(), *this );
-    aContainer.PackFrom( symbol );
 }
 
 
 bool SCH_SYMBOL::Deserialize( const google::protobuf::Any& aContainer )
 {
+    kiapi::schematic::types::SchematicSymbolInstance symbol;
+    return aContainer.UnpackTo( &symbol ) && Deserialize( symbol );
+}
+
+
+bool SCH_SYMBOL::Deserialize( const kiapi::schematic::types::SchematicSymbolInstance& symbol )
+{
     using namespace kiapi::common;
     using namespace kiapi::common::types;
     using namespace kiapi::schematic::types;
-
-    SchematicSymbolInstance symbol;
-
-    if( !aContainer.UnpackTo( &symbol ) )
-        return false;
 
     kiapi::common::UnpackCustomProperties( symbol.custom_properties(), *this );
 
@@ -401,22 +388,11 @@ bool SCH_SYMBOL::Deserialize( const google::protobuf::Any& aContainer )
     else if( def.type() == SchematicSymbolType::SST_LOCAL_POWER )
         libSymbol->SetLocalPowerSymbolProp( true );
 
-    google::protobuf::Any any;
-
-    any.PackFrom( def.reference_field() );
-    libSymbol->GetField( FIELD_T::REFERENCE )->Deserialize( any );
-
-    any.PackFrom( def.value_field() );
-    libSymbol->GetField( FIELD_T::VALUE )->Deserialize( any );
-
-    any.PackFrom( def.footprint_field() );
-    libSymbol->GetField( FIELD_T::FOOTPRINT )->Deserialize( any );
-
-    any.PackFrom( def.datasheet_field() );
-    libSymbol->GetField( FIELD_T::DATASHEET )->Deserialize( any );
-
-    any.PackFrom( def.description_field() );
-    libSymbol->GetField( FIELD_T::DESCRIPTION )->Deserialize( any );
+    libSymbol->GetField( FIELD_T::REFERENCE )->Deserialize( def.reference_field() );
+    libSymbol->GetField( FIELD_T::VALUE )->Deserialize( def.value_field() );
+    libSymbol->GetField( FIELD_T::FOOTPRINT )->Deserialize( def.footprint_field() );
+    libSymbol->GetField( FIELD_T::DATASHEET )->Deserialize( def.datasheet_field() );
+    libSymbol->GetField( FIELD_T::DESCRIPTION )->Deserialize( def.description_field() );
 
     std::unordered_map<::KIID, wxString> pinAltMap;
 
@@ -429,21 +405,28 @@ bool SCH_SYMBOL::Deserialize( const google::protobuf::Any& aContainer )
 
         std::unique_ptr<EDA_ITEM> item = CreateItemForType( *type, libSymbol.get() );
 
-        if( !item || !item->Deserialize( child.item() ) )
+        if( !item )
             return false;
 
-        SCH_ITEM* schItem = static_cast<SCH_ITEM*>( item.release() );
-
-        if( schItem->Type() == SCH_PIN_T )
+        if( *type == SCH_PIN_T )
         {
             SchematicPin pinProto;
 
-            if( child.item().UnpackTo( &pinProto ) )
-            {
-                if( pinProto.has_active_alternate() )
-                    pinAltMap[schItem->m_Uuid] = wxString::FromUTF8( pinProto.active_alternate() );
-            }
+            if( !child.item().UnpackTo( &pinProto ) )
+                return false;
+
+            // The active alternate belongs to the placed pin after UpdatePins links it.
+            static_cast<SCH_PIN*>( item.get() )->DeserializeDefinition( pinProto );
+
+            if( pinProto.has_active_alternate() )
+                pinAltMap[item->m_Uuid] = wxString::FromUTF8( pinProto.active_alternate() );
         }
+        else if( !item->Deserialize( child.item() ) )
+        {
+            return false;
+        }
+
+        SCH_ITEM* schItem = static_cast<SCH_ITEM*>( item.release() );
 
         if( child.has_unit() )
             schItem->SetUnit( child.unit().unit() );
@@ -526,20 +509,11 @@ bool SCH_SYMBOL::Deserialize( const google::protobuf::Any& aContainer )
     if( symbol.has_body_style() )
         SetBodyStyle( symbol.body_style().style() );
 
-    any.PackFrom( symbol.reference_field() );
-    GetField( FIELD_T::REFERENCE )->Deserialize( any );
-
-    any.PackFrom( symbol.value_field() );
-    GetField( FIELD_T::VALUE )->Deserialize( any );
-
-    any.PackFrom( symbol.footprint_field() );
-    GetField( FIELD_T::FOOTPRINT )->Deserialize( any );
-
-    any.PackFrom( symbol.datasheet_field() );
-    GetField( FIELD_T::DATASHEET )->Deserialize( any );
-
-    any.PackFrom( symbol.description_field() );
-    GetField( FIELD_T::DESCRIPTION )->Deserialize( any );
+    GetField( FIELD_T::REFERENCE )->Deserialize( symbol.reference_field() );
+    GetField( FIELD_T::VALUE )->Deserialize( symbol.value_field() );
+    GetField( FIELD_T::FOOTPRINT )->Deserialize( symbol.footprint_field() );
+    GetField( FIELD_T::DATASHEET )->Deserialize( symbol.datasheet_field() );
+    GetField( FIELD_T::DESCRIPTION )->Deserialize( symbol.description_field() );
 
     // Replace the complete user-field set on update.  Keeping fields that are
     // absent from the request makes a client unable to clear a field and also
@@ -557,9 +531,8 @@ bool SCH_SYMBOL::Deserialize( const google::protobuf::Any& aContainer )
             continue;
 
         m_fields.emplace_back( this, FIELD_T::USER, name );
-        any.PackFrom( userField );
 
-        if( !m_fields.back().Deserialize( any ) )
+        if( !m_fields.back().Deserialize( userField ) )
             m_fields.pop_back();
     }
 

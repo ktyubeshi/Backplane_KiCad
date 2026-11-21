@@ -25,7 +25,11 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <nng/nng.h>
 
 
 class KINNG_REQUEST_SERVER
@@ -35,32 +39,28 @@ public:
 
     ~KINNG_REQUEST_SERVER();
 
-    bool Start();
+    // The request bytes are valid for the duration of the callback.
+    bool Start( std::function<void( std::string_view )> aCallback );
 
     void Stop();
 
     bool Running() const;
 
-    void SetCallback( std::function<void(std::string*)> aFunc ) { m_callback = aFunc; }
-
-    void Reply( const std::string& aReply );
+    void Reply( std::string aReply );
 
     const std::string& SocketPath() const { return m_socketUrl; }
 
 private:
-    void listenThread();
+    void listenThread( std::function<void( std::string_view )> aCallback );
 
     std::thread m_thread;
 
-    std::atomic<bool> m_shutdown;
+    std::atomic<bool> m_shutdown{ false };
 
     std::string m_socketUrl;
 
-    std::function<void(std::string*)> m_callback;
-
-    std::string m_sharedMessage;
-
-    std::string m_pendingReply;
+    nng_socket m_socket{};
+    std::optional<std::string> m_pendingReply;
 
     std::condition_variable m_replyReady;
 

@@ -294,13 +294,24 @@ void SCH_PIN::Serialize( google::protobuf::Any& aContainer ) const
 
 bool SCH_PIN::Deserialize( const google::protobuf::Any& aContainer )
 {
-    using namespace kiapi::common;
-    using namespace kiapi::schematic::types;
-
-    SchematicPin pin;
+    kiapi::schematic::types::SchematicPin pin;
 
     if( !aContainer.UnpackTo( &pin ) )
         return false;
+
+    DeserializeDefinition( pin );
+
+    if( pin.has_active_alternate() )
+        SetAlt( wxString::FromUTF8( pin.active_alternate() ) );
+
+    return true;
+}
+
+
+void SCH_PIN::DeserializeDefinition( const kiapi::schematic::types::SchematicPin& pin )
+{
+    using namespace kiapi::common;
+    using namespace kiapi::schematic::types;
 
     kiapi::common::UnpackCustomProperties( pin.custom_properties(), *this );
 
@@ -330,11 +341,6 @@ bool SCH_PIN::Deserialize( const google::protobuf::Any& aContainer )
         alt.m_Type = FromProtoEnum<ELECTRICAL_PINTYPE>( altProto.electrical_type() );
         alts.emplace( alt.m_Name, alt );
     }
-
-    if( pin.has_active_alternate() )
-        SetAlt( wxString::FromUTF8( pin.active_alternate() ) );
-
-    return true;
 }
 
 

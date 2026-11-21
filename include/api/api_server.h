@@ -21,9 +21,11 @@
 #ifndef KICAD_API_SERVER_H
 #define KICAD_API_SERVER_H
 
+#include <atomic>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 
 #include <wx/event.h>
 #include <wx/filename.h>
@@ -35,7 +37,7 @@ class KINNG_REQUEST_SERVER;
 class wxEvtHandler;
 
 
-wxDECLARE_EVENT( API_REQUEST_EVENT, wxCommandEvent );
+wxDECLARE_EVENT( API_REQUEST_EVENT, wxThreadEvent );
 
 
 class KICOMMON_API KICAD_API_SERVER : public wxEvtHandler
@@ -82,20 +84,10 @@ public:
 
 private:
 
-    /**
-     * Callback that executes on the server thread and generates an event that will be handled by
-     * the wxWidgets event loop to process an incoming request.  Temporarily takes ownership of the
-     * request pointer so that it can be passed through the event system.
-     *
-     * @param aRequest is a pointer to a string containing bytes that came in over the wire
-     */
-    void onApiRequest( std::string* aRequest );
+    /** Decode the transport's request buffer and queue the envelope for the editor thread. */
+    void onApiRequest( std::string_view aRequest );
 
-    /**
-     * Event handler that receives the event on the main thread sent by onApiRequest
-     * @param aEvent will contain a pointer to an incoming API request string in the client data
-     */
-    void handleApiEvent( wxCommandEvent& aEvent );
+    void handleApiEvent( wxThreadEvent& aEvent );
 
     void log( const std::string& aOutput );
 
@@ -105,7 +97,7 @@ private:
 
     std::string m_token;
 
-    bool m_readyToReply;
+    std::atomic<bool> m_readyToReply;
 
     wxString m_socketPathOverride;
 

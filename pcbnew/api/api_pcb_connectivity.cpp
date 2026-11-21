@@ -26,9 +26,48 @@
 #include <connectivity/connectivity_data.h>
 #include <netclass.h>
 #include <netinfo.h>
+#include <unordered_set>
 
 using namespace kiapi::common::commands;
 using kiapi::common::types::ItemRequestStatus;
+
+static ApiResponseStatus connectivityBusy()
+{
+    ApiResponseStatus busy;
+    busy.set_status( ApiStatusCode::AS_BUSY );
+    busy.set_error_message( "board connectivity is being updated" );
+    return busy;
+}
+
+
+static HANDLER_RESULT<GetItemsResponse> packNetItems( BOARD& aBoard, const std::vector<int>& aNetCodes,
+                                                      const std::vector<KICAD_T>& aTypes )
+{
+    GetItemsResponse response;
+    response.set_status( ItemRequestStatus::IRS_OK );
+
+    if( aNetCodes.empty() )
+        return response;
+
+    std::vector<std::vector<BOARD_CONNECTED_ITEM*>> items;
+
+    if( !aBoard.GetConnectivity()->TryGetNetItems( aBoard, aNetCodes, aTypes, items ) )
+        return tl::unexpected( connectivityBusy() );
+
+    std::unordered_set<KIID> inserted;
+
+    for( const auto& netItems : items )
+    {
+        for( BOARD_CONNECTED_ITEM* item : netItems )
+        {
+            if( inserted.insert( item->m_Uuid ).second )
+                item->Serialize( *response.add_items() );
+        }
+    }
+
+    return response;
+}
+
 
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetConnectedItems(
         const HANDLER_CONTEXT<GetConnectedItems>& aCtx )
@@ -77,6 +116,10 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetConnectedItems(
 
     GetItemsResponse response;
     std::shared_ptr<CONNECTIVITY_DATA> conn = board()->GetConnectivity();
+
+    if( !conn->HasBoardConnectivity() && !board()->BuildConnectivity() )
+        return tl::unexpected( connectivityBusy() );
+
     std::set<KIID> insertedItems;
 
     for( BOARD_CONNECTED_ITEM* source : sourceItems )
@@ -126,31 +169,18 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItemsByNet(
     if( !filterByType )
         types.assign( { PCB_PAD_T, PCB_VIA_T, PCB_TRACE_T, PCB_ARC_T, PCB_SHAPE_T, PCB_ZONE_T } );
 
-    GetItemsResponse response;
-    BOARD* board = this->board();
-    std::shared_ptr<CONNECTIVITY_DATA> conn = board->GetConnectivity();
-    std::set<KIID> insertedItems;
-
-    const NETINFO_LIST& nets = board->GetNetInfo();
+    std::vector<int> netCodes;
+    const NETINFO_LIST& nets = board()->GetNetInfo();
 
     for( const board::types::Net& net : aCtx.Request.nets() )
     {
         NETINFO_ITEM* netInfo = nets.GetNetItem( wxString::FromUTF8( net.name() ) );
 
-        if( !netInfo )
-            continue;
-
-        for( BOARD_CONNECTED_ITEM* item : conn->GetNetItems( netInfo->GetNetCode(), types ) )
-        {
-            if( !insertedItems.insert( item->m_Uuid ).second )
-                continue;
-
-            item->Serialize( *response.add_items() );
-        }
+        if( netInfo )
+            netCodes.push_back( netInfo->GetNetCode() );
     }
 
-    response.set_status( ItemRequestStatus::IRS_OK );
-    return response;
+    return packNetItems( *board(), netCodes, types );
 }
 
 
@@ -187,12 +217,9 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItemsByNetClass(
     for( const std::string& netClass : aCtx.Request.net_classes() )
         requestedClasses.insert( wxString( netClass.c_str(), wxConvUTF8 ) );
 
-    GetItemsResponse response;
-    BOARD* board = this->board();
-    std::shared_ptr<CONNECTIVITY_DATA> conn = board->GetConnectivity();
-    std::set<KIID> insertedItems;
+    std::vector<int> netCodes;
 
-    for( NETINFO_ITEM* net : board->GetNetInfo() )
+    for( NETINFO_ITEM* net : board()->GetNetInfo() )
     {
         if( !net )
             continue;
@@ -219,15 +246,8 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_PCB::handleGetItemsByNetClass(
                 continue;
         }
 
-        for( BOARD_CONNECTED_ITEM* item : conn->GetNetItems( net->GetNetCode(), types ) )
-        {
-            if( !insertedItems.insert( item->m_Uuid ).second )
-                continue;
-
-            item->Serialize( *response.add_items() );
-        }
+        netCodes.push_back( net->GetNetCode() );
     }
 
-    response.set_status( ItemRequestStatus::IRS_OK );
-    return response;
+    return packNetItems( *board(), netCodes, types );
 }

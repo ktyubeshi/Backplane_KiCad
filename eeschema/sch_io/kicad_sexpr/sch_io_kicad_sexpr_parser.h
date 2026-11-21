@@ -77,9 +77,8 @@ public:
 class SCH_IO_KICAD_SEXPR_PARSER : public SCHEMATIC_LEXER
 {
 public:
-    SCH_IO_KICAD_SEXPR_PARSER( LINE_READER* aLineReader = nullptr,
-                      PROGRESS_REPORTER* aProgressReporter = nullptr, unsigned aLineCount = 0,
-                      SCH_SHEET* aRootSheet = nullptr, bool aIsAppending = false );
+    SCH_IO_KICAD_SEXPR_PARSER( LINE_READER* aLineReader = nullptr, SCH_SHEET* aRootSheet = nullptr,
+                              bool aIsAppending = false );
 
     void ParseLib( LIB_SYMBOL_MAP& aSymbolLibMap );
 
@@ -133,8 +132,6 @@ private:
         LIB_ID            libId;
         std::vector<KIID> memberUuids;
     };
-
-    void checkpoint();
 
     KIID parseKIID();
 
@@ -279,10 +276,6 @@ private:
 
     std::set<KIID>     m_uuids;
 
-    PROGRESS_REPORTER* m_progressReporter;  // optional; may be nullptr
-    const LINE_READER* m_lineReader;        // for progress reporting
-    unsigned           m_lastProgressLine;
-    unsigned           m_lineCount;         // for progress reporting
 
     KIID               m_rootUuid;          // The UUID of the root schematic.
 

@@ -200,28 +200,33 @@ SCH_FIELD::SCH_FIELD( const SCH_FIELD& aField ) :
 void SCH_FIELD::Serialize( google::protobuf::Any& aContainer ) const
 {
     kiapi::schematic::types::SchematicField field;
+    Serialize( field );
+    aContainer.PackFrom( field );
+}
 
+
+void SCH_FIELD::Serialize( kiapi::schematic::types::SchematicField& field ) const
+{
+    field.Clear();
     field.set_name( GetName( false ).ToUTF8() );
     field.set_visible( IsVisible() );
     field.set_show_name( IsNameShown() );
     field.set_allow_auto_place( CanAutoplace() );
 
-    google::protobuf::Any any;
-    EDA_TEXT::Serialize( any, schIUScale );
-    any.UnpackTo( field.mutable_text() );
-
+    EDA_TEXT::Serialize( *field.mutable_text(), schIUScale );
     kiapi::common::PackCustomProperties( field.mutable_custom_properties(), *this );
-    aContainer.PackFrom( field );
 }
 
 
 bool SCH_FIELD::Deserialize( const google::protobuf::Any& aContainer )
 {
     kiapi::schematic::types::SchematicField field;
+    return aContainer.UnpackTo( &field ) && Deserialize( field );
+}
 
-    if( !aContainer.UnpackTo( &field ) )
-        return false;
 
+bool SCH_FIELD::Deserialize( const kiapi::schematic::types::SchematicField& field )
+{
     kiapi::common::UnpackCustomProperties( field.custom_properties(), *this );
 
 
@@ -230,9 +235,7 @@ bool SCH_FIELD::Deserialize( const google::protobuf::Any& aContainer )
     SetNameShown( field.show_name() );
     SetCanAutoplace( field.allow_auto_place() );
 
-    google::protobuf::Any any;
-    any.PackFrom( field.text() );
-    return EDA_TEXT::Deserialize( any, schIUScale );
+    return EDA_TEXT::Deserialize( field.text(), schIUScale );
 }
 
 

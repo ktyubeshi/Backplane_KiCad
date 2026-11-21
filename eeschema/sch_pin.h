@@ -33,6 +33,11 @@ class LIB_SYMBOL;
 class SCH_SYMBOL;
 class PIN_LAYOUT_CACHE;
 
+namespace kiapi::schematic::types
+{
+    class SchematicPin;
+}
+
 // Circle diameter drawn at the active end of pins:
 #define TARGET_PIN_RADIUS   schIUScale.MilsToIU( 15 )
 
@@ -73,6 +78,7 @@ public:
 
     void Serialize( google::protobuf::Any& aContainer ) const override;
     bool Deserialize( const google::protobuf::Any& aContainer ) override;
+    void DeserializeDefinition( const kiapi::schematic::types::SchematicPin& aPin );
 
     wxString GetClass() const override
     {

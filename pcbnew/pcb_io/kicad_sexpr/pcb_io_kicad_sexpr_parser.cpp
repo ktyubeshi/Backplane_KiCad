@@ -73,7 +73,6 @@
 #include <string_utils.h>
 #include <stroke_params_parser.h>
 #include <wx/log.h>
-#include <progress_reporter.h>
 #include <board_stackup_manager/stackup_predefined_prms.h>
 #include <pgm_base.h>
 #include <trace_helpers.h>
@@ -139,28 +138,6 @@ void PCB_IO_KICAD_SEXPR_PARSER::init()
         std::string key = fmt::format( "Inner{}.Cu", i );
 
         m_layerMasks[key] = LSET( { PCB_LAYER_ID( In15_Cu - 2 * i ) } );
-    }
-}
-
-
-void PCB_IO_KICAD_SEXPR_PARSER::checkpoint()
-{
-    if( m_progressReporter )
-    {
-        TIME_PT curTime = CLOCK::now();
-        unsigned curLine = reader->LineNumber();
-        auto delta = std::chrono::duration_cast<TIMEOUT>( curTime - m_lastProgressTime );
-
-        if( delta > std::chrono::milliseconds( 250 ) )
-        {
-            m_progressReporter->SetCurrentProgress( ( (double) curLine )
-                                                            / std::max( 1U, m_lineCount ) );
-
-            if( !m_progressReporter->KeepRefreshing() )
-                THROW_IO_ERROR( _( "Open canceled by user." ) );
-
-            m_lastProgressTime = curTime;
-        }
     }
 }
 
@@ -1210,8 +1187,6 @@ BOARD* PCB_IO_KICAD_SEXPR_PARSER::parseBOARD_unchecked()
 
     for( token = NextTok();  token != T_RIGHT;  token = NextTok() )
     {
-        checkpoint();
-
         if( token != T_LEFT )
             Expecting( T_LEFT );
 

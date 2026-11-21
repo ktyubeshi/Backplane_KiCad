@@ -118,11 +118,7 @@ bool PackSymbol( kiapi::schematic::types::SchematicSymbolInstance* aOutput, cons
         return false;
     }
 
-    google::protobuf::Any any;
-    aInput->Serialize( any );
-
-    if( !any.UnpackTo( aOutput ) )
-        return false;
+    aInput->Serialize( *aOutput );
 
     // Instance pins carry UUIDs and alternate selections that are not present on
     // the library pins serialized by SCH_SYMBOL.  Include them from the concrete
@@ -183,10 +179,7 @@ bool UnpackSymbol( SCH_SYMBOL* aOutput, const kiapi::schematic::types::Schematic
     using namespace kiapi::common::types;
     using namespace kiapi::schematic::types;
 
-    google::protobuf::Any any;
-    any.PackFrom( aInput );
-
-    if( !aOutput->Deserialize( any ) )
+    if( !aOutput->Deserialize( aInput ) )
         return false;
 
     SCH_SYMBOL_INSTANCE instance;
@@ -239,18 +232,14 @@ bool UnpackSymbol( SCH_SYMBOL* aOutput, const kiapi::schematic::types::Schematic
 bool PackSheet( kiapi::schematic::types::SheetSymbol* aOutput, const SCH_SHEET* aInput,
                 const SCH_SHEET_PATH& aPath )
 {
-    google::protobuf::Any any;
-    aInput->Serialize( any );
-
-    if( !any.UnpackTo( aOutput ) )
-        return false;
-
-    PackSheetPath( *aOutput->mutable_path(), aPath.Path() );
+    aInput->Serialize( *aOutput );
+    const KIID_PATH path = aPath.Path();
+    PackSheetPath( *aOutput->mutable_path(), path );
     aOutput->set_page_number( aPath.GetPageNumber().ToUTF8() );
 
     for( const SCH_SHEET_INSTANCE& instance : aInput->GetInstances() )
     {
-        if( instance.m_Path != aPath.Path() )
+        if( instance.m_Path != path )
             continue;
 
         for( const auto& [name, variantInfo] : instance.m_Variants )
@@ -275,10 +264,7 @@ bool PackSheet( kiapi::schematic::types::SheetSymbol* aOutput, const SCH_SHEET* 
 
 tl::expected<bool, ApiResponseStatus> UnpackSheet( SCH_SHEET* aOutput, const kiapi::schematic::types::SheetSymbol& aInput )
 {
-    google::protobuf::Any any;
-    any.PackFrom( aInput );
-
-    if( !aOutput->Deserialize( any ) )
+    if( !aOutput->Deserialize( aInput ) )
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );

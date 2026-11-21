@@ -91,6 +91,10 @@ def main():
                         return result
 
                     request(base.Ping(), Empty)
+                    connection.send(b"\x80")  # Truncated protobuf field tag.
+                    malformed = envelope.ApiResponse.FromString(connection.recv())
+                    assert malformed.status.status == envelope.AS_BAD_REQUEST, malformed.status
+                    assert malformed.header.kicad_token == token
                     version = request(base.GetVersion(), base.GetVersionResponse)
                     print(f"Runtime: {version.version}", flush=True)
 

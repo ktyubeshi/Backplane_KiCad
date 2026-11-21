@@ -11,6 +11,7 @@
 #include <wx/file.h>
 #include <wx/filefn.h>
 #include <wx/filename.h>
+#include <utility>
 
 namespace
 {
@@ -73,7 +74,7 @@ void BACKPLANE_DOCUMENT_METADATA::Load( const wxString& aDocumentPath )
 
     try
     {
-        const auto data = nlohmann::json::parse( contents.ToUTF8().data() );
+        auto data = nlohmann::json::parse( contents.ToUTF8().data() );
 
         if( data.at( "format" ) != "backplane-kicad-metadata" || data.at( "version" ) != 1
             || !data.at( "items" ).is_object() )
@@ -81,7 +82,7 @@ void BACKPLANE_DOCUMENT_METADATA::Load( const wxString& aDocumentPath )
             THROW_IO_ERROR( wxString::Format( "Unsupported Backplane companion metadata: %s", path ) );
         }
 
-        m_items = data.at( "items" );
+        m_items = std::move( data.at( "items" ) );
     }
     catch( const nlohmann::json::exception& error )
     {

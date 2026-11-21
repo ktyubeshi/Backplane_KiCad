@@ -52,6 +52,8 @@
 #include <wx/filename.h>
 
 #include <api/common/types/base_types.pb.h>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace kiapi::common::commands;
 using kiapi::common::types::CommandStatus;
@@ -62,6 +64,105 @@ using kiapi::common::types::ItemRequestStatus;
 namespace
 {
 using SELECTED_SCH_ITEM = std::pair<SCH_ITEM*, SCH_SHEET_PATH>;
+
+
+SCH_SHEET_LIST requestedSheets( const SCHEMATIC& aSchematic, const types::DocumentSpecifier& aDocument )
+{
+    SCH_SHEET_LIST sheets = aSchematic.Hierarchy();
+
+    if( aDocument.has_sheet_path() )
+    {
+        if( auto path = sheets.GetSheetPathByKIIDPath( UnpackSheetPath( aDocument.sheet_path() ) ) )
+        {
+            sheets.clear();
+            sheets.push_back( std::move( *path ) );
+        }
+    }
+
+    return sheets;
+}
+
+
+void visitSchematicItemsById( const SCH_SHEET_LIST& aSheets,
+                              const google::protobuf::RepeatedPtrField<types::KIID>& aIds,
+                              const auto& aVisitor )
+{
+    if( aIds.empty() )
+        return;
+
+    if( aIds.size() == 1 )
+    {
+        SCH_SHEET_PATH path;
+
+        if( SCH_ITEM* item = aSheets.ResolveItem( KIID( aIds[0].value() ), &path, true ) )
+            aVisitor( item, path );
+
+        return;
+    }
+
+    struct LOCATION
+    {
+        SCH_ITEM*             item = nullptr;
+        const SCH_SHEET_PATH* path = nullptr;
+    };
+
+    std::unordered_map<KIID, LOCATION> matches;
+    std::vector<const LOCATION*> order;
+    matches.reserve( aIds.size() );
+    order.reserve( aIds.size() );
+
+    for( const types::KIID& id : aIds )
+        order.push_back( &matches[KIID( id.value() )] );
+
+    size_t remaining = matches.size();
+    std::vector<SCH_ITEM*> children;
+    std::unordered_set<const SCH_SCREEN*> visited;
+
+    for( const SCH_SHEET_PATH& path : aSheets )
+    {
+        const SCH_SCREEN* screen = path.LastScreen();
+
+        // All instances share the same item IDs. ResolveItem returns the first matching path.
+        if( !visited.insert( screen ).second )
+            continue;
+
+        auto match = [&]( SCH_ITEM* item )
+        {
+            auto it = matches.find( item->m_Uuid );
+
+            if( it != matches.end() && !it->second.item )
+            {
+                it->second = { item, &path };
+                --remaining;
+            }
+        };
+
+        for( SCH_ITEM* item : screen->Items() )
+        {
+            match( item );
+            children.clear();
+            item->RunOnChildren( [&]( SCH_ITEM* child ) { children.push_back( child ); },
+                                 RECURSE_MODE::NO_RECURSE );
+
+            // ResolveItem chooses the first matching parent, then the last matching child
+            // of that parent if an older document contains colliding child IDs.
+            for( auto it = children.rbegin(); it != children.rend(); ++it )
+                match( *it );
+
+            if( remaining == 0 )
+                break;
+        }
+
+        if( remaining == 0 )
+            break;
+    }
+
+    for( const LOCATION* location : order )
+    {
+        if( location->item )
+            aVisitor( location->item, *location->path );
+    }
+}
 
 
 void collectSelectedSchematicItems( const SCHEMATIC* aSchematic,
@@ -101,27 +202,23 @@ void clearSelectedSchematicItems( const SCHEMATIC* aSchematic )
 }
 
 
-void packSchematicSelectionItem( google::protobuf::Any& aOutput, SCH_ITEM* aItem,
-                                 const SCH_SHEET_PATH& aPath )
+bool packSchematicItem( google::protobuf::Any& aOutput, SCH_ITEM* aItem, const SCH_SHEET_PATH& aPath )
 {
     if( aItem->Type() == SCH_SYMBOL_T )
     {
         kiapi::schematic::types::SchematicSymbolInstance symbol;
 
-        if( PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( aItem ), aPath ) )
-            aOutput.PackFrom( symbol );
+        return PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( aItem ), aPath ) && aOutput.PackFrom( symbol );
     }
-    else if( aItem->Type() == SCH_SHEET_T )
+    if( aItem->Type() == SCH_SHEET_T )
     {
         kiapi::schematic::types::SheetSymbol sheet;
 
-        if( PackSheet( &sheet, static_cast<SCH_SHEET*>( aItem ), aPath ) )
-            aOutput.PackFrom( sheet );
+        return PackSheet( &sheet, static_cast<SCH_SHEET*>( aItem ), aPath ) && aOutput.PackFrom( sheet );
     }
-    else
-    {
-        aItem->Serialize( aOutput );
-    }
+
+    aItem->Serialize( aOutput );
+    return true;
 }
 
 
@@ -594,16 +691,6 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_SCH::handleGetOpenDocuments
 }
 
 
-void API_HANDLER_SCH::filterValidSchTypes( std::set<KICAD_T>& aTypeList )
-{
-    std::erase_if( aTypeList,
-                   []( KICAD_T aType )
-                   {
-                       return !s_allowedTypes.contains( aType );
-                   } );
-}
-
-
 HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_CONTEXT<GetItems>& aCtx )
 {
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
@@ -615,12 +702,8 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
         return tl::unexpected( valid.error() );
     }
 
-    std::set<KICAD_T> typesRequested, typesInserted;
-
-    for( KICAD_T type : parseRequestedItemTypes( aCtx.Request.types() ) )
-        typesRequested.insert( type );
-
-    filterValidSchTypes( typesRequested );
+    std::vector<KICAD_T> typesRequested = parseRequestedItemTypes( aCtx.Request.types() );
+    std::erase_if( typesRequested, []( KICAD_T type ) { return !s_allowedTypes.contains( type ); } );
 
     if( typesRequested.empty() )
     {
@@ -630,82 +713,36 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItems( const HANDLER_
         return tl::unexpected( e );
     }
 
-    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-    std::optional<SCH_SHEET_PATH> pathFilter;
+    const SCH_SHEET_LIST sheets = requestedSheets( *schematic(), aCtx.Request.header().document() );
+    std::map<KICAD_T, std::vector<std::pair<SCH_ITEM*, const SCH_SHEET_PATH*>>> itemMap;
 
-    if( aCtx.Request.header().document().has_sheet_path() )
+    for( KICAD_T type : typesRequested )
+        itemMap.try_emplace( type );
+
+    for( const SCH_SHEET_PATH& path : sheets )
     {
-        KIID_PATH kp = UnpackSheetPath( aCtx.Request.header().document().sheet_path() );
-        pathFilter = hierarchy.GetSheetPathByKIIDPath( kp );
-    }
-
-    std::map<KICAD_T, std::vector<std::pair<EDA_ITEM*, SCH_SHEET_PATH>>> itemMap;
-
-    auto processScreen =
-        [&]( const SCH_SHEET_PATH& aPath )
+        auto collect = [&]( SCH_ITEM* item )
         {
-            const SCH_SCREEN* aScreen = aPath.LastScreen();
-
-            for( SCH_ITEM* aItem : aScreen->Items() )
-            {
-                itemMap[ aItem->Type() ].emplace_back( aItem, aPath );
-
-                aItem->RunOnChildren(
-                        [&]( SCH_ITEM* aChild )
-                        {
-                            itemMap[ aChild->Type() ].emplace_back( aChild, aPath );
-                        },
-                        RECURSE_MODE::NO_RECURSE );
-            }
+            if( auto it = itemMap.find( item->Type() ); it != itemMap.end() )
+                it->second.emplace_back( item, &path );
         };
 
-    if( pathFilter )
-    {
-        processScreen( *pathFilter );
-    }
-    else
-    {
-        for( const SCH_SHEET_PATH& path : hierarchy )
-            processScreen( path );
+        for( SCH_ITEM* item : path.LastScreen()->Items() )
+        {
+            collect( item );
+            item->RunOnChildren( collect, RECURSE_MODE::NO_RECURSE );
+        }
     }
 
     GetItemsResponse response;
     google::protobuf::Any any;
 
-    for( KICAD_T type : parseRequestedItemTypes( aCtx.Request.types() ) )
+    for( KICAD_T type : typesRequested )
     {
-        if( !s_allowedTypes.contains( type ) )
-            continue;
-
-        if( typesInserted.contains( type ) )
-            continue;
-
         for( const auto& [item, itemPath] : itemMap[type] )
         {
-            if( item->Type() == SCH_SYMBOL_T )
-            {
-                kiapi::schematic::types::SchematicSymbolInstance symbol;
-
-                if( !PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( item ), itemPath ) )
-                    continue;
-
-                any.PackFrom( symbol );
-            }
-            else if( item->Type() == SCH_SHEET_T )
-            {
-                kiapi::schematic::types::SheetSymbol sheet;
-
-                if( !PackSheet( &sheet, static_cast<SCH_SHEET*>( item ), itemPath ) )
-                    continue;
-
-                any.PackFrom( sheet );
-            }
-            else
-            {
-                item->Serialize( any );
-            }
-
-            response.mutable_items()->Add( std::move( any ) );
+            if( packSchematicItem( any, item, *itemPath ) )
+                response.mutable_items()->Add( std::move( any ) );
         }
     }
 
@@ -726,63 +763,15 @@ HANDLER_RESULT<GetItemsResponse> API_HANDLER_SCH::handleGetItemsById( const HAND
         return tl::unexpected( e );
     }
 
-    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-    std::optional<SCH_SHEET_PATH> pathFilter;
-
-    if( aCtx.Request.header().document().has_sheet_path() )
-    {
-        KIID_PATH kp = UnpackSheetPath( aCtx.Request.header().document().sheet_path() );
-        pathFilter = hierarchy.GetSheetPathByKIIDPath( kp );
-    }
-
     GetItemsResponse response;
-    SCH_ITEM* item = nullptr;
     google::protobuf::Any any;
 
-    for( const types::KIID& idProto : aCtx.Request.items() )
+    visitSchematicItemsById( requestedSheets( *schematic(), aCtx.Request.header().document() ),
+                            aCtx.Request.items(), [&]( SCH_ITEM* item, const SCH_SHEET_PATH& path )
     {
-        KIID id( idProto.value() );
-
-        SCH_SHEET_PATH itemPath;
-
-        if( pathFilter )
-        {
-            item = pathFilter->ResolveItem( id );
-            itemPath = *pathFilter;
-        }
-        else
-        {
-            item = hierarchy.ResolveItem( id, &itemPath, true );
-        }
-
-        if( !item || !s_allowedTypes.contains( item->Type() ) )
-            continue;
-
-        if( item->Type() == SCH_SYMBOL_T )
-        {
-            kiapi::schematic::types::SchematicSymbolInstance symbol;
-
-            if( !PackSymbol( &symbol, static_cast<SCH_SYMBOL*>( item ), itemPath ) )
-                continue;
-
-            any.PackFrom( symbol );
-        }
-        else if( item->Type() == SCH_SHEET_T )
-        {
-            kiapi::schematic::types::SheetSymbol sheet;
-
-            if( !PackSheet( &sheet, static_cast<SCH_SHEET*>( item ), itemPath ) )
-                continue;
-
-            any.PackFrom( sheet );
-        }
-        else
-        {
-            item->Serialize( any );
-        }
-
-        response.mutable_items()->Add( std::move( any ) );
-    }
+        if( s_allowedTypes.contains( item->Type() ) && packSchematicItem( any, item, path ) )
+            response.mutable_items()->Add( std::move( any ) );
+    } );
 
     if( response.items().empty() )
     {
@@ -848,7 +837,7 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_SCH::handleGetSelection(
         if( filter.empty() || filter.contains( item->Type() ) )
         {
             google::protobuf::Any packed;
-            packSchematicSelectionItem( packed, item, path );
+            packSchematicItem( packed, item, path );
             response.mutable_items()->Add( std::move( packed ) );
         }
     }
@@ -900,15 +889,8 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_SCH::handleAddToSelection(
     }
 
     EDA_ITEMS toAdd;
-    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-
-    for( const types::KIID& id : aCtx.Request.items() )
-    {
-        SCH_SHEET_PATH path;
-
-        if( SCH_ITEM* item = hierarchy.ResolveItem( KIID( id.value() ), &path, true ) )
-            toAdd.push_back( item );
-    }
+    visitSchematicItemsById( schematic()->Hierarchy(), aCtx.Request.items(),
+                             [&]( SCH_ITEM* item, const SCH_SHEET_PATH& ) { toAdd.push_back( item ); } );
 
     if( m_frame )
     {
@@ -944,15 +926,8 @@ HANDLER_RESULT<SelectionResponse> API_HANDLER_SCH::handleRemoveFromSelection(
     }
 
     EDA_ITEMS toRemove;
-    SCH_SHEET_LIST hierarchy = schematic()->Hierarchy();
-
-    for( const types::KIID& id : aCtx.Request.items() )
-    {
-        SCH_SHEET_PATH path;
-
-        if( SCH_ITEM* item = hierarchy.ResolveItem( KIID( id.value() ), &path, true ) )
-            toRemove.push_back( item );
-    }
+    visitSchematicItemsById( schematic()->Hierarchy(), aCtx.Request.items(),
+                             [&]( SCH_ITEM* item, const SCH_SHEET_PATH& ) { toRemove.push_back( item ); } );
 
     if( m_frame )
     {

@@ -19,6 +19,7 @@
  */
 
 #include <fmt/format.h>
+#include <limits>
 #include <wx/app.h>
 #include <wx/datetime.h>
 #include <wx/event.h>
@@ -47,7 +48,7 @@ using kiapi::common::ApiRequest, kiapi::common::ApiResponse, kiapi::common::ApiS
 wxString KICAD_API_SERVER::s_logFileName = "api.log";
 
 
-wxDEFINE_EVENT( API_REQUEST_EVENT, wxCommandEvent );
+wxDEFINE_EVENT( API_REQUEST_EVENT, wxThreadEvent );
 
 
 KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
@@ -140,20 +141,25 @@ void KICAD_API_SERVER::Start()
 
     m_server = std::make_unique<KINNG_REQUEST_SERVER>(
             fmt::format( "ipc://{}", socket.GetFullPath().ToStdString() ) );
-    m_server->SetCallback( [&]( std::string* aRequest ) { onApiRequest( aRequest ); } );
-
     m_logFilePath.AssignDir( PATHS::GetLogsPath() );
     m_logFilePath.SetName( s_logFileName );
 
     if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
-    {
         PATHS::EnsurePathExists( PATHS::GetLogsPath() );
-        log( fmt::format( "--- KiCad API server started at {} ---\n", SocketPath() ) );
-    }
-
-    wxLogTrace( traceApi, wxString::Format( "Server: listening at %s", SocketPath() ) );
 
     Bind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
+
+    if( !m_server->Start( [this]( std::string_view request ) { onApiRequest( request ); } ) )
+    {
+        Unbind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
+        m_server.reset();
+        return;
+    }
+
+    if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
+        log( fmt::format( "--- KiCad API server started at {} ---\n", SocketPath() ) );
+
+    wxLogTrace( traceApi, wxString::Format( "Server: listening at %s", SocketPath() ) );
 }
 
 
@@ -166,6 +172,8 @@ void KICAD_API_SERVER::Stop()
     Unbind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
 
     m_server->Stop();
+    // A queued request from this listener must not be dispatched after a restart.
+    DeletePendingEvents();
     m_server.reset( nullptr );
 }
 
@@ -217,7 +225,7 @@ std::string KICAD_API_SERVER::StandardSocketUrl()
 }
 
 
-void KICAD_API_SERVER::onApiRequest( std::string* aRequest )
+void KICAD_API_SERVER::onApiRequest( std::string_view aRequest )
 {
     if( !m_readyToReply )
     {
@@ -225,26 +233,31 @@ void KICAD_API_SERVER::onApiRequest( std::string* aRequest )
         notHandled.mutable_status()->set_status( ApiStatusCode::AS_NOT_READY );
         notHandled.mutable_status()->set_error_message( "KiCad is not ready to reply" );
         m_server->Reply( notHandled.SerializeAsString() );
-        log( "Got incoming request but was not yet ready to reply." );
+        if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
+            log( "Got incoming request but was not yet ready to reply." );
+
         return;
     }
 
-    wxCommandEvent* evt = new wxCommandEvent( API_REQUEST_EVENT );
+    auto request = std::make_shared<ApiRequest>();
 
-    // We don't actually need write access to this string, but client data is non-const
-    evt->SetClientData( static_cast<void*>( aRequest ) );
+    if( aRequest.size() > static_cast<size_t>( std::numeric_limits<int>::max() )
+        || !request->ParseFromArray( aRequest.data(), static_cast<int>( aRequest.size() ) ) )
+    {
+        request.reset();
+    }
 
-    // Takes ownership and frees the wxCommandEvent
+    auto* evt = new wxThreadEvent( API_REQUEST_EVENT );
+    evt->SetPayload( request );
     QueueEvent( evt );
 }
 
 
-void KICAD_API_SERVER::handleApiEvent( wxCommandEvent& aEvent )
+void KICAD_API_SERVER::handleApiEvent( wxThreadEvent& aEvent )
 {
-    std::string& requestString = *static_cast<std::string*>( aEvent.GetClientData() );
-    ApiRequest request;
+    auto envelope = aEvent.GetPayload<std::shared_ptr<ApiRequest>>();
 
-    if( !request.ParseFromString( requestString ) )
+    if( !envelope )
     {
         ApiResponse error;
         error.mutable_header()->set_kicad_token( m_token );
@@ -254,7 +267,11 @@ void KICAD_API_SERVER::handleApiEvent( wxCommandEvent& aEvent )
 
         if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
             log( "Response (ERROR): " + error.Utf8DebugString() );
+
+        return;
     }
+
+    ApiRequest& request = *envelope;
 
     if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
         log( "Request: " + request.Utf8DebugString() );
@@ -286,8 +303,6 @@ void KICAD_API_SERVER::handleApiEvent( wxCommandEvent& aEvent )
         else if( result.error().status() != ApiStatusCode::AS_UNHANDLED )
             break;
     }
-
-    // Note: at the point we call Reply(), we no longer own requestString.
 
     if( result.has_value() )
     {

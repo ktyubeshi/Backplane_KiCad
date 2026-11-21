@@ -51,7 +51,7 @@ void LoadSheetSchematicContents( const std::string& fileName, SCH_SHEET* sheet )
     wxASSERT( fileStream.is_open() );
     STDISTREAM_LINE_READER reader;
     reader.SetStream( fileStream );
-    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, nullptr, 0, sheet );
+    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, sheet );
     parser.ParseSchematic( sheet );
 }
 
@@ -138,7 +138,7 @@ std::unique_ptr<SCHEMATIC> ReadSchematicFromStream( std::istream& aStream, PROJE
     STDISTREAM_LINE_READER reader;
     reader.SetStream( aStream );
 
-    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, nullptr, 0, rootSheet );
+    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, rootSheet );
     parser.ParseSchematic( rootSheet );
 
     // Link symbol instances the way LoadSchematic does for the single-sheet case

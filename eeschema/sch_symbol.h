@@ -59,6 +59,11 @@ class SCH_SCREEN;
 class SCH_COMMIT;
 class SCH_SHAPE;
 
+namespace kiapi::schematic::types
+{
+    class SchematicSymbolInstance;
+}
+
 
 /// A container for several SCH_FIELD items
 typedef std::vector<SCH_FIELD>    SCH_FIELDS;
@@ -925,6 +930,8 @@ public:
 
     void Serialize( google::protobuf::Any& aContainer ) const override;
     bool Deserialize( const google::protobuf::Any& aContainer ) override;
+    void Serialize( kiapi::schematic::types::SchematicSymbolInstance& aOutput ) const;
+    bool Deserialize( const kiapi::schematic::types::SchematicSymbolInstance& aInput );
 
 #if defined(DEBUG)
     void Show( int nestLevel, std::ostream& os ) const override;

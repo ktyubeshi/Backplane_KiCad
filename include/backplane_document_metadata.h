@@ -23,6 +23,7 @@ class BACKPLANE_DOCUMENT_METADATA
 public:
     void Load( const wxString& aDocumentPath );
     void Save( const wxString& aDocumentPath ) const;
+    bool IsEmpty() const { return m_items.empty(); }
 
     void Capture( const wxString& aKey, const EDA_ITEM& aItem );
     void Apply( const wxString& aKey, EDA_ITEM& aItem ) const;

@@ -29,7 +29,14 @@
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
 #include <richio.h>
+#include <cli_progress_reporter.h>
+#include <dsnlexer.h>
+#include <io/kicad/kicad_file_reader.h>
 #include <io/kicad/kicad_io_utils.h>
+#include <wx/filename.h>
+#include <chrono>
+#include <cstring>
+#include <thread>
 
 #define wxUSE_BASE64 1
 #include <wx/base64.h>
@@ -37,6 +44,114 @@
 
 
 BOOST_AUTO_TEST_SUITE( RichIO )
+
+
+BOOST_AUTO_TEST_CASE( BufferedNativeFileLines )
+{
+    wxFFile file;
+    const wxString path = wxFileName::CreateTempFileName( wxS( "kicad-lines" ), &file );
+    BOOST_REQUIRE( file.IsOpened() );
+
+    // End on a block boundary, cross two more, and preserve embedded NUL and an unterminated tail.
+    std::string contents( 32767, 'a' );
+    contents += "\n\n";
+    contents.append( 70000, 'b' );
+    contents.append( "\0c\r\nlast", 8 );
+    BOOST_REQUIRE_EQUAL( file.Write( contents.data(), contents.size() ), contents.size() );
+    BOOST_REQUIRE( file.Close() );
+
+    {
+        FILE_LINE_READER expected( path );
+        KICAD_FILE_READER reader( path );
+
+        while( expected.ReadLine() )
+        {
+            BOOST_REQUIRE( reader.ReadLine() );
+            BOOST_CHECK_EQUAL( reader.LineNumber(), expected.LineNumber() );
+            BOOST_REQUIRE_EQUAL( reader.Length(), expected.Length() );
+            BOOST_CHECK_EQUAL( std::memcmp( reader.Line(), expected.Line(), reader.Length() + 1 ), 0 );
+        }
+
+        BOOST_CHECK( !reader.ReadLine() );
+        BOOST_CHECK_EQUAL( reader.LineNumber(), expected.LineNumber() );
+        BOOST_CHECK_EQUAL( reader.Length(), 0U );
+    }
+
+    BOOST_CHECK( wxRemoveFile( path ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( BufferedNativeLineLimit )
+{
+    wxFFile file;
+    const wxString path = wxFileName::CreateTempFileName( wxS( "kicad-line-limit" ), &file );
+    BOOST_REQUIRE( file.IsOpened() );
+    std::string line( LINE_READER_LINE_DEFAULT_MAX, 'x' );
+    line.back() = '\n';
+    BOOST_REQUIRE_EQUAL( file.Write( line.data(), line.size() ), line.size() );
+    line.back() = 'x';
+    BOOST_REQUIRE_EQUAL( file.Write( line.data(), line.size() ), line.size() );
+    BOOST_REQUIRE( file.Close() );
+
+    {
+        KICAD_FILE_READER reader( path );
+        BOOST_REQUIRE( reader.ReadLine() );
+        BOOST_CHECK_EQUAL( reader.Length(), LINE_READER_LINE_DEFAULT_MAX );
+        BOOST_CHECK_THROW( reader.ReadLine(), IO_ERROR );
+    }
+
+    BOOST_CHECK( wxRemoveFile( path ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( BufferedNativeReadProgressAndCancel )
+{
+    struct REPORTER : CLI_PROGRESS_REPORTER
+    {
+        void SetCurrentProgress( double aProgress ) override { progress = aProgress; }
+        bool KeepRefreshing( bool ) override { return !cancelled; }
+        double progress = 0;
+        bool   cancelled = false;
+    } reporter;
+
+    wxFFile file;
+    const wxString path = wxFileName::CreateTempFileName( wxS( "kicad-progress" ), &file );
+    BOOST_REQUIRE( file.IsOpened() );
+    std::string block( 32767, 'a' );
+    block += '\n';
+    BOOST_REQUIRE_EQUAL( file.Write( block.data(), block.size() ), block.size() );
+    BOOST_REQUIRE_EQUAL( file.Write( block.data(), block.size() ), block.size() );
+    BOOST_REQUIRE( file.Close() );
+
+    {
+        KICAD_FILE_READER reader( path, &reporter );
+        BOOST_REQUIRE( reader.ReadLine() );
+        reporter.cancelled = true;
+        std::this_thread::sleep_for( std::chrono::milliseconds( 260 ) );
+        BOOST_CHECK_THROW( reader.ReadLine(), IO_ERROR );
+        BOOST_CHECK_GT( reporter.progress, 0.0 );
+        BOOST_CHECK_LT( reporter.progress, 1.0 );
+    }
+
+    BOOST_CHECK( wxRemoveFile( path ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( LexerTextAndSeparators )
+{
+    DSNLEXER lexer( "  (name\n\t \"abc\\n\\x41\\101\\\\\\\"z\"  -1.5e+2)" );
+    BOOST_CHECK_EQUAL( lexer.NextTok(), DSN_LEFT );
+    BOOST_CHECK_EQUAL( lexer.CurSeparator(), "  " );
+    BOOST_CHECK_EQUAL( lexer.NextTok(), DSN_SYMBOL );
+    BOOST_CHECK_EQUAL( lexer.CurStr(), "name" );
+    BOOST_CHECK_EQUAL( lexer.NextTok(), DSN_STRING );
+    BOOST_CHECK_EQUAL( lexer.CurSeparator(), "\n\t " );
+    BOOST_CHECK_EQUAL( lexer.CurStr(), "abc\nAA\\\"z" );
+    BOOST_CHECK_EQUAL( lexer.NextTok(), DSN_NUMBER );
+    BOOST_CHECK_EQUAL( lexer.CurStr(), "-1.5e+2" );
+    BOOST_CHECK_EQUAL( lexer.NextTok(), DSN_RIGHT );
+    BOOST_CHECK_EQUAL( lexer.NextTok(), DSN_EOF );
+}
 
 
 /**
