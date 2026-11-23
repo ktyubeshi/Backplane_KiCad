@@ -173,11 +173,19 @@ SCH_SHEET::SCH_SHEET( EDA_ITEM* aParent, const VECTOR2I& aPos, VECTOR2I aSize ) 
 
 void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
 {
+    kiapi::schematic::types::SheetSymbol sheet;
+    Serialize( sheet );
+    aContainer.PackFrom( sheet );
+}
+
+
+void SCH_SHEET::Serialize( kiapi::schematic::types::SheetSymbol& sheet ) const
+{
     using namespace kiapi::common;
     using namespace kiapi::common::types;
     using namespace kiapi::schematic::types;
 
-    SheetSymbol sheet;
+    sheet.Clear();
 
     sheet.mutable_id()->set_value( m_Uuid.AsStdString() );
     PackVector2( *sheet.mutable_position(), GetPosition(), schIUScale );
@@ -218,7 +226,6 @@ void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
         pin->Serialize( *sheet.add_pins() );
 
     kiapi::common::PackCustomProperties( sheet.mutable_custom_properties(), *this );
-    aContainer.PackFrom( sheet );
 }
 
 

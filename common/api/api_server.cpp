@@ -20,6 +20,7 @@
 
 #include <fmt/format.h>
 #include <algorithm>
+#include <limits>
 #include <cstring>
 #include <exception>
 #include <wx/app.h>
@@ -214,26 +215,25 @@ bool KICAD_API_SERVER::Start()
 
     m_server = std::make_unique<KINNG_REQUEST_SERVER>(
             fmt::format( "ipc://{}", socket.GetFullPath().ToStdString() ) );
-    m_server->SetCallback( [&]( std::string* aRequest ) { onApiRequest( aRequest ); } );
+    m_logFilePath.AssignDir( PATHS::GetLogsPath() );
+    m_logFilePath.SetName( s_logFileName );
 
-    if( !m_server->Start() )
+    if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
+        PATHS::EnsurePathExists( PATHS::GetLogsPath() );
+
+    Bind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
+    if( !m_server->Start( [this]( std::string_view bytes ) { onApiRequest( bytes ); } ) )
     {
+        Unbind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
         wxLogTrace( traceApi, "Server: failed to start KINNG listener thread" );
         m_server.reset( nullptr );
         return false;
     }
 
-    m_logFilePath.AssignDir( PATHS::GetLogsPath() );
-    m_logFilePath.SetName( s_logFileName );
-
     if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
-    {
-        PATHS::EnsurePathExists( PATHS::GetLogsPath() );
         log( fmt::format( "--- KiCad API server started at {} ---\n", SocketPath() ) );
-    }
 
     wxLogTrace( traceApi, wxString::Format( "Server: listening at %s", SocketPath() ) );
-    Bind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
     BACKPLANE_EMBED::Get().StartupMark( "API socket bound" );
     startWatchdog();
     return true;
@@ -250,6 +250,9 @@ void KICAD_API_SERVER::Stop()
     Unbind( API_REQUEST_EVENT, &KICAD_API_SERVER::handleApiEvent, this );
 
     m_server->Stop();
+    DeletePendingEvents();
+    m_pending.store( 0 );
+    m_pendingSinceMs.store( 0 );
     m_server.reset( nullptr );
 }
 
@@ -433,7 +436,7 @@ void KICAD_API_SERVER::stopWatchdog()
 }
 
 
-void KICAD_API_SERVER::onApiRequest( std::string* aRequest )
+void KICAD_API_SERVER::onApiRequest( std::string_view aBytes )
 {
     if( !m_firstReceived.exchange( true ) )
         BACKPLANE_EMBED::Get().StartupMark( "first API request received" );
@@ -444,79 +447,90 @@ void KICAD_API_SERVER::onApiRequest( std::string* aRequest )
         notHandled.mutable_status()->set_status( ApiStatusCode::AS_NOT_READY );
         notHandled.mutable_status()->set_error_message( "KiCad is not ready to reply" );
         m_server->Reply( notHandled.SerializeAsString() );
-        log( "Got incoming request but was not yet ready to reply." );
+        if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
+            log( "Got incoming request but was not yet ready to reply." );
 
         if( m_notReadyAnswers.fetch_add( 1 ) == 0 )
             BACKPLANE_EMBED::Get().StartupMark( "first request answered not-ready" );
         return;
     }
 
-    // CancelProgress is answered here, on the server's thread: the job it stops is what keeps
-    // the UI thread busy (BACKPLANE_EMBED::RequestCancel is thread-safe).
-    if( aRequest->find( "CancelProgress" ) != std::string::npos )
+    auto parsed = std::make_shared<ApiRequest>();
+    if( aBytes.size() > static_cast<size_t>( std::numeric_limits<int>::max() )
+        || !parsed->ParseFromArray( aBytes.data(), static_cast<int>( aBytes.size() ) ) )
     {
-        ApiRequest  request;
-        std::string type;
+        m_handledRequestCount.fetch_add( 1, std::memory_order_relaxed );
+        ApiResponse error;
+        error.mutable_header()->set_kicad_token( m_token );
+        error.mutable_status()->set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.mutable_status()->set_error_message( "request could not be parsed" );
+        m_server->Reply( error.SerializeAsString() );
 
-        if( request.ParseFromString( *aRequest )
-            && google::protobuf::Any::ParseAnyTypeUrl( request.message().type_url(), &type )
-            && type == "kiapi.backplane.embed.CancelProgress" )
+        if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
+            log( "Response (ERROR): " + error.Utf8DebugString() );
+
+        return;
+    }
+
+    ApiRequest& request = *parsed;
+    std::string type;
+    google::protobuf::Any::ParseAnyTypeUrl( request.message().type_url(), &type );
+
+    // Cancellation must run on the listener while the editor thread is busy.
+    if( type == "kiapi.backplane.embed.CancelProgress" )
+    {
+        ApiResponse response;
+        response.mutable_header()->set_kicad_token( m_token );
+        kiapi::backplane::embed::CancelProgress cancel;
+
+        if( !request.header().kicad_token().empty() && request.header().kicad_token() != m_token )
         {
-            ApiResponse response;
-            response.mutable_header()->set_kicad_token( m_token );
-            kiapi::backplane::embed::CancelProgress cancel;
-
-            if( !request.header().kicad_token().empty() && request.header().kicad_token() != m_token )
-            {
-                response.mutable_status()->set_status( ApiStatusCode::AS_TOKEN_MISMATCH );
-                response.mutable_status()->set_error_message(
-                        "the provided kicad_token did not match this KiCad instance's token" );
-            }
-            else if( request.message().UnpackTo( &cancel )
-                     && BACKPLANE_EMBED::Get().RequestCancel( cancel.id() ) )
-            {
-                kiapi::backplane::embed::CancelProgressResponse reply;
-                reply.set_cancelling( true );
-                response.mutable_status()->set_status( ApiStatusCode::AS_OK );
-                response.mutable_message()->PackFrom( reply );
-            }
-            else
-            {
-                response.mutable_status()->set_status( ApiStatusCode::AS_BAD_REQUEST );
-                response.mutable_status()->set_error_message(
-                        "no running cancellable job with that id" );
-            }
-
-            m_server->Reply( response.SerializeAsString() );
-            return;
+            response.mutable_status()->set_status( ApiStatusCode::AS_TOKEN_MISMATCH );
+            response.mutable_status()->set_error_message(
+                    "the provided kicad_token did not match this KiCad instance's token" );
         }
+        else if( request.message().UnpackTo( &cancel )
+                 && BACKPLANE_EMBED::Get().RequestCancel( cancel.id() ) )
+        {
+            kiapi::backplane::embed::CancelProgressResponse reply;
+            reply.set_cancelling( true );
+            response.mutable_status()->set_status( ApiStatusCode::AS_OK );
+            response.mutable_message()->PackFrom( reply );
+        }
+        else
+        {
+            response.mutable_status()->set_status( ApiStatusCode::AS_BAD_REQUEST );
+            response.mutable_status()->set_error_message(
+                    "no running cancellable job with that id" );
+        }
+
+        m_server->Reply( response.SerializeAsString() );
+        return;
     }
 
     KICAD_API_REQUEST_EVENT* evt = new KICAD_API_REQUEST_EVENT( API_REQUEST_EVENT );
 
-    // We don't actually need write access to this string, but client data is non-const
-    evt->SetClientData( static_cast<void*>( aRequest ) );
-
-    // A host window request (#1199) takes its place in the embed's host order now, at receipt:
-    // the events socket's SetHostGeometry, received on another thread, is ordered against it
-    if( aRequest->find( "kiapi.backplane.embed." ) != std::string::npos )
-    {
-        ApiRequest  request;
-        std::string type;
-
-        if( request.ParseFromString( *aRequest )
-            && google::protobuf::Any::ParseAnyTypeUrl( request.message().type_url(), &type ) )
-        {
-            evt->SetExtraLong( static_cast<long>( BACKPLANE_EMBED::Get().ReserveHostSlot( type ) ) );
-        }
-    }
+    evt->request = std::move( parsed );
+    if( type.starts_with( "kiapi.backplane.embed." ) )
+        evt->SetExtraLong( static_cast<long>( BACKPLANE_EMBED::Get().ReserveHostSlot( type ) ) );
 
     // Waiting for the UI thread from now: the watchdog reports a long wait
     if( m_pending.fetch_add( 1 ) == 0 )
         m_pendingSinceMs = steadyMs();
 
     // Takes ownership and frees the wxCommandEvent
-    QueueEvent( evt );
+    {
+        std::lock_guard lock( m_wakeMutex );
+        QueueEvent( evt );
+    }
+    m_wake.notify_one();
+}
+
+
+void KICAD_API_SERVER::WaitForRequest( std::chrono::milliseconds aTimeout )
+{
+    std::unique_lock lock( m_wakeMutex );
+    m_wake.wait_for( lock, aTimeout, [this] { return m_pending.load() > 0; } );
 }
 
 
@@ -601,7 +615,7 @@ void KICAD_API_SERVER::ServeDuringTask()
 }
 
 
-void KICAD_API_SERVER::handleApiEvent( wxCommandEvent& aEvent )
+void KICAD_API_SERVER::handleApiEvent( KICAD_API_REQUEST_EVENT& aEvent )
 {
     if( m_pending.fetch_sub( 1 ) <= 1 )
         m_pendingSinceMs = 0;
@@ -611,35 +625,18 @@ void KICAD_API_SERVER::handleApiEvent( wxCommandEvent& aEvent )
     if( !m_firstDispatched.exchange( true ) )
         BACKPLANE_EMBED::Get().StartupMark( "first API request dispatched on the UI thread" );
 
-    std::string& requestString = *static_cast<std::string*>( aEvent.GetClientData() );
-
     // A host request's slot is filled by its handler, or dropped when it is refused
     BACKPLANE_EMBED::HOST_REQUEST hostRequest( static_cast<uint64_t>( aEvent.GetExtraLong() ) );
-    handleApiRequestString( requestString );
+    handleApiRequest( *aEvent.request );
 }
 
 
-void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
+void KICAD_API_SERVER::handleApiRequest( ApiRequest& request )
 {
     std::unique_ptr<BACKPLANE_EMBED::TRACE_SCOPE> trace;
 
     m_handledRequestCount.fetch_add( 1, std::memory_order_relaxed );
 
-    ApiRequest request;
-
-    if( !request.ParseFromString( aRequestString ) )
-    {
-        ApiResponse error;
-        error.mutable_header()->set_kicad_token( m_token );
-        error.mutable_status()->set_status( ApiStatusCode::AS_BAD_REQUEST );
-        error.mutable_status()->set_error_message( "request could not be parsed" );
-        m_server->Reply( error.SerializeAsString() );
-
-        if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
-            log( "Response (ERROR): " + error.Utf8DebugString() );
-
-        return;
-    }
 
     if( ADVANCED_CFG::GetCfg().m_EnableAPILogging )
         log( "Request: " + request.Utf8DebugString() );

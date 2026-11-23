@@ -413,6 +413,7 @@ set( KICOMMON_SRCS
     backplane_embed_comment.cpp
     backplane_embed_progress.cpp
 
+    io/kicad/kicad_file_reader.cpp
     io/kicad/kicad_io_utils.cpp    # needed by richio
     io/io_base.cpp
     io/io_utils.cpp

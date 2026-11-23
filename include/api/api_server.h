@@ -22,12 +22,16 @@
 #define KICAD_API_SERVER_H
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <wx/event.h>
@@ -36,6 +40,8 @@
 #include <kicommon.h>
 #include <api/common/types/base_types.pb.h>
 #include <google/protobuf/any.pb.h>
+
+namespace kiapi::common { class ApiRequest; }
 
 class API_HANDLER;
 class KINNG_REQUEST_SERVER;
@@ -48,6 +54,8 @@ public:
     KICAD_API_REQUEST_EVENT( wxEventType aEventType = wxEVT_NULL ) :
             wxCommandEvent( aEventType )
     {}
+
+    std::shared_ptr<kiapi::common::ApiRequest> request;
 
     wxEvent* Clone() const override { return new KICAD_API_REQUEST_EVENT( *this ); }
 
@@ -68,6 +76,9 @@ public:
 #endif
         return m_pendingEvents && !m_pendingEvents->IsEmpty();
     }
+
+    /// Wake the headless event pump when IPC work arrives, or when its supervision timer is due.
+    void WaitForRequest( std::chrono::milliseconds aTimeout );
 
     /**
      * Answer the requests queued for the main thread now, from inside a long step of a running API
@@ -191,22 +202,9 @@ public:
 
 private:
 
-    /**
-     * Callback that executes on the server thread and generates an event that will be handled by
-     * the wxWidgets event loop to process an incoming request.  Temporarily takes ownership of the
-     * request pointer so that it can be passed through the event system.
-     *
-     * @param aRequest is a pointer to a string containing bytes that came in over the wire
-     */
-    void onApiRequest( std::string* aRequest );
-
-    /**
-     * Event handler that receives the event on the main thread sent by onApiRequest
-     * @param aEvent will contain a pointer to an incoming API request string in the client data
-     */
-    void handleApiEvent( wxCommandEvent& aEvent );
-
-    void handleApiRequestString( std::string& aRequestString );
+    void onApiRequest( std::string_view aBytes );
+    void handleApiEvent( KICAD_API_REQUEST_EVENT& aEvent );
+    void handleApiRequest( kiapi::common::ApiRequest& request );
 
     void log( const std::string& aOutput );
 
@@ -226,6 +224,8 @@ private:
 
     std::atomic<int64_t>    m_pendingSinceMs{ 0 };   ///< oldest request not yet dispatched, 0 if none
     std::atomic<int>        m_pending{ 0 };
+    std::mutex              m_wakeMutex;
+    std::condition_variable m_wake;
     std::atomic<int>        m_notReadyAnswers{ 0 };  ///< requests answered AS_NOT_READY
     std::atomic<bool>       m_firstReceived{ false };
     std::atomic<bool>       m_firstDispatched{ false };

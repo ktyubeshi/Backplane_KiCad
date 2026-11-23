@@ -981,7 +981,7 @@ int CLI::API_SERVER_COMMAND::doPerform( KIWAY& aKiway )
 #endif
         }
 
-        wxMilliSleep( 10 );
+        server->WaitForRequest( std::chrono::milliseconds( 10 ) );
     }
 
     std::signal( SIGINT, oldSigInt );

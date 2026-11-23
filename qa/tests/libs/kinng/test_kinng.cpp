@@ -14,16 +14,12 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <wx/filename.h>
-#include <wx/stdpaths.h>
-
-#include <qa_utils/wx_utils/unit_test_utils.h>
 #include <qa_utils/file_utils.h>
-
+#include <qa_utils/wx_utils/unit_test_utils.h>
 #include <kinng.h>
 #include <nng/nng.h>
 #include <nng/protocol/reqrep0/req.h>
@@ -34,16 +30,48 @@
 #include <mutex>
 #include <thread>
 
-#include <import_export.h>
-#include <api/common/envelope.pb.h>
-
 BOOST_AUTO_TEST_SUITE( KiNNG )
 
-BOOST_AUTO_TEST_CASE( CreateIPCResponder )
+BOOST_AUTO_TEST_CASE( ReplyAndStopWithAnOutstandingRequest )
 {
-    KI_TEST::SCOPED_TEMP_DIR tempDir( "kicad_qa_kinng" );
+    const std::string url = "inproc://qa-kinng";
+    std::promise<void> received;
+    auto pending = received.get_future();
+    KINNG_REQUEST_SERVER server( url );
+    BOOST_REQUIRE( server.Start( [&]( std::string_view request )
+    {
+        if( request == "hold" )
+            received.set_value();
+        else
+            server.Reply( std::string( request ) );
+    } ) );
 
-    KINNG_REQUEST_SERVER server( tempDir.Path().string() );
+    struct CLIENT
+    {
+        nng_socket socket{};
+        ~CLIENT() { nng_close( socket ); }
+    } client;
+
+    BOOST_REQUIRE_EQUAL( nng_req0_open( &client.socket ), 0 );
+    BOOST_REQUIRE_EQUAL( nng_socket_set_ms( client.socket, NNG_OPT_SENDTIMEO, 2000 ), 0 );
+    BOOST_REQUIRE_EQUAL( nng_socket_set_ms( client.socket, NNG_OPT_RECVTIMEO, 2000 ), 0 );
+    BOOST_REQUIRE_EQUAL( nng_dial( client.socket, url.c_str(), nullptr, 0 ), 0 );
+
+    for( std::string request : { std::string( "a\0b", 3 ), std::string() } )
+    {
+        BOOST_REQUIRE_EQUAL( nng_send( client.socket, request.data(), request.size(), 0 ), 0 );
+        char reply[4];
+        size_t size = sizeof( reply );
+        BOOST_REQUIRE_EQUAL( nng_recv( client.socket, reply, &size, 0 ), 0 );
+        BOOST_CHECK_EQUAL( std::string( reply, size ), request );
+    }
+
+    char hold[] = "hold";
+    BOOST_REQUIRE_EQUAL( nng_send( client.socket, hold, sizeof( hold ) - 1, 0 ), 0 );
+    BOOST_REQUIRE( pending.wait_for( std::chrono::seconds( 2 ) ) == std::future_status::ready );
+    server.Stop();
+    BOOST_CHECK( !server.Running() );
+    BOOST_CHECK( server.Start( [&]( std::string_view ) { server.Reply( "" ); } ) );
 }
 
 /**
@@ -62,9 +90,11 @@ BOOST_AUTO_TEST_CASE( StopWhileARequestWaitsForItsReply )
     auto*              server = new KINNG_REQUEST_SERVER( url );
     auto               received = std::make_shared<std::promise<void>>();
     auto               once = std::make_shared<std::once_flag>();
-    server->SetCallback( [received, once]( std::string* ) { std::call_once( *once, [&]() { received->set_value(); } ); } ); // no Reply
     server->SetStopHookForTest( []() { std::this_thread::sleep_for( std::chrono::milliseconds( 300 ) ); } );
-    BOOST_REQUIRE( server->Start() );
+    BOOST_REQUIRE( server->Start( [received, once]( std::string_view )
+    {
+        std::call_once( *once, [&]() { received->set_value(); } );
+    } ) ); // no Reply
 
     nng_socket client;
     BOOST_REQUIRE_EQUAL( nng_req0_open( &client ), 0 );
@@ -95,8 +125,7 @@ BOOST_AUTO_TEST_CASE( AnEmptyReplyIsSent )
     KI_TEST::SCOPED_TEMP_DIR tempDir( "kicad_qa_kinng" );
     std::string              url = "ipc://" + ( tempDir.Path() / "kinng-empty.sock" ).string();
     KINNG_REQUEST_SERVER     server( url );
-    server.SetCallback( [&]( std::string* ) { server.Reply( "" ); } );
-    BOOST_REQUIRE( server.Start() );
+    BOOST_REQUIRE( server.Start( [&]( std::string_view ) { server.Reply( "" ); } ) );
 
     nng_socket client;
     BOOST_REQUIRE_EQUAL( nng_req0_open( &client ), 0 );

@@ -20,6 +20,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <io/kicad/kicad_file_reader.h>
 #include <algorithm>
 
 #include <fmt/format.h>
@@ -423,9 +424,8 @@ void SCH_IO_KICAD_SEXPR::loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, 
 
 void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet )
 {
-    FILE_LINE_READER reader( aFileName );
+    KICAD_FILE_READER reader( aFileName, m_progressReporter );
 
-    size_t lineCount = 0;
 
     if( m_progressReporter )
     {
@@ -433,20 +433,16 @@ void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet 
 
         if( !m_progressReporter->KeepRefreshing() )
             THROW_IO_CANCELLED();
-
-        while( reader.ReadLine() )
-            lineCount++;
-
-        reader.Rewind();
     }
 
-    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, m_progressReporter, lineCount, m_rootSheet,
+    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, m_progressReporter, 0, m_rootSheet,
                                       m_appending, m_sheetLoad );
 
     parser.ParseSchematic( aSheet );
     auto& metadata = aSheet->GetScreen()->BackplaneMetadata();
     metadata.Load( aFileName );
-    ApplyBackplaneMetadata( *aSheet->GetScreen(), metadata );
+    if( !metadata.IsEmpty() )
+        ApplyBackplaneMetadata( *aSheet->GetScreen(), metadata );
 
     // Net chains live at the root-sheet level. Sub-sheet parses always produce empty maps,
     // so applying them would wipe the chains restored from the root file.

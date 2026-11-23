@@ -151,7 +151,7 @@ void PCB_IO_KICAD_SEXPR_PARSER::init()
 
 void PCB_IO_KICAD_SEXPR_PARSER::checkpoint()
 {
-    if( m_progressReporter )
+    if( m_progressReporter && m_lineCount )
     {
         TIME_PT curTime = CLOCK::now();
         unsigned curLine = reader->LineNumber();

@@ -18,6 +18,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <io/kicad/kicad_file_reader.h>
 #include <api/api_server.h>
 #include <wx/dir.h>
 #include <wx/ffile.h>
@@ -174,7 +175,7 @@ void FP_CACHE::Load()
             try
             {
                 boost::ptr_map<wxString, FP_CACHE_ENTRY> tmp;
-                FILE_LINE_READER reader( fn.GetFullPath() );
+                KICAD_FILE_READER reader( fn.GetFullPath() );
                 PCB_IO_KICAD_SEXPR_PARSER parser( &reader, nullptr, nullptr );
 
                 parser.ParseFootprintLib( tmp );
@@ -273,7 +274,7 @@ bool PCB_IO_KICAD_SEXPR::CanReadBoard( const wxString& aFileName ) const
 
     try
     {
-        FILE_LINE_READER reader( aFileName );
+        KICAD_FILE_READER reader( aFileName );
         PCB_IO_KICAD_SEXPR_PARSER       parser( &reader, nullptr, m_queryUserCallback );
 
         return parser.IsValidBoardHeader();
@@ -3823,9 +3824,8 @@ PCB_IO_KICAD_SEXPR::~PCB_IO_KICAD_SEXPR()
 void PCB_IO_KICAD_SEXPR::loadBoard( const wxString& aFileName, BOARD& aBoard, bool aIsNewLoad,
                                     const std::map<std::string, UTF8>* aProperties, PROJECT* aProject )
 {
-    FILE_LINE_READER reader( aFileName );
+    KICAD_FILE_READER reader( aFileName, m_progressReporter );
 
-    unsigned lineCount = 0;
 
     // Collect the font substitution warnings (RAII - automatically reset on scope exit)
     FONTCONFIG_REPORTER_SCOPE fontconfigScope( &LOAD_INFO_REPORTER::GetInstance() );
@@ -3836,14 +3836,9 @@ void PCB_IO_KICAD_SEXPR::loadBoard( const wxString& aFileName, BOARD& aBoard, bo
 
         if( !m_progressReporter->KeepRefreshing() )
             THROW_IO_CANCELLED();
-
-        while( reader.ReadLine() )
-            lineCount++;
-
-        reader.Rewind();
     }
 
-    DoLoad( reader, aBoard, aIsNewLoad, aProperties, m_progressReporter, lineCount );
+    DoLoad( reader, aBoard, aIsNewLoad, aProperties, m_progressReporter, 0 );
 
     if( aIsNewLoad )
     {
@@ -3883,40 +3878,43 @@ void PCB_IO_KICAD_SEXPR::loadBoard( const wxString& aFileName, BOARD& aBoard, bo
             THROW_IO_ERROR( wxString::Format( "Invalid Backplane board structure: %s",
                                              wxString::FromUTF8( error.what() ) ) );
         }
-        aBoard.RunOnChildren( [&]( BOARD_ITEM* item )
+        if( !metadata.IsEmpty() )
         {
-            metadata.Apply( item->m_Uuid.AsString(), *item );
-
-            if( auto* footprint = dynamic_cast<FOOTPRINT*>( item ) )
+            aBoard.RunOnChildren( [&]( BOARD_ITEM* item )
             {
-                const auto extra = metadata.ReadExtension( item->m_Uuid.AsString(), "footprint" );
+                metadata.Apply( item->m_Uuid.AsString(), *item );
 
-                if( !extra.is_null() )
+                if( auto* footprint = dynamic_cast<FOOTPRINT*>( item ) )
                 {
-                    try
-                    {
-                        if( extra.value( "exclude_from_simulation", false ) )
-                            footprint->SetExcludedFromSim( true );
+                    const auto extra = metadata.ReadExtension( item->m_Uuid.AsString(), "footprint" );
 
-                        if( extra.contains( "variant_simulation" ) )
+                    if( !extra.is_null() )
+                    {
+                        try
                         {
-                            for( const auto& [name, value] : extra.at( "variant_simulation" ).items() )
+                            if( extra.value( "exclude_from_simulation", false ) )
+                                footprint->SetExcludedFromSim( true );
+
+                            if( extra.contains( "variant_simulation" ) )
                             {
-                                if( auto* variant = footprint->GetVariant( wxString::FromUTF8( name ) ) )
+                                for( const auto& [name, value] : extra.at( "variant_simulation" ).items() )
                                 {
-                                    if( value.get<bool>() )
-                                        variant->SetExcludedFromSim( true );
+                                    if( auto* variant = footprint->GetVariant( wxString::FromUTF8( name ) ) )
+                                    {
+                                        if( value.get<bool>() )
+                                            variant->SetExcludedFromSim( true );
+                                    }
                                 }
                             }
                         }
-                    }
-                    catch( const nlohmann::json::exception& error )
-                    {
-                        THROW_IO_ERROR( wxString::FromUTF8( error.what() ) );
+                        catch( const nlohmann::json::exception& error )
+                        {
+                            THROW_IO_ERROR( wxString::FromUTF8( error.what() ) );
+                        }
                     }
                 }
-            }
-        }, RECURSE_MODE::RECURSE );
+            }, RECURSE_MODE::RECURSE );
+        }
 
         // Native board properties cache project text variables.  Save and GUI
         // refresh call SynchronizeProperties(), replacing that cache.  Seed
@@ -4149,7 +4147,7 @@ std::unique_ptr<FOOTPRINT> PCB_IO_KICAD_SEXPR::ImportFootprint( const wxString& 
 
     // Suppress font substitution warnings (RAII - automatically restored on scope exit)
     FONTCONFIG_REPORTER_SCOPE fontconfigScope( nullptr );
-    FILE_LINE_READER          reader( aFootprintPath );
+    KICAD_FILE_READER          reader( aFootprintPath );
     PCB_IO_KICAD_SEXPR_PARSER parser( &reader, nullptr, nullptr );
 
     parser.ParseFootprintLib( footprints );

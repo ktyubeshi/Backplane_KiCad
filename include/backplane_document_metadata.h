@@ -29,6 +29,8 @@ public:
     // restoring an older companion cannot resurrect deleted construction.
     bool HasExtensionHistory() const { return m_hadExtensions; }
 
+    bool IsEmpty() const { return m_items.empty() && m_extensions.empty(); }
+
     void Apply( const wxString& aKey, EDA_ITEM& aItem ) const;
 
     // SCH_LINE has line endings but does not inherit EDA_SHAPE.
