@@ -3563,11 +3563,16 @@ void SCH_IO_KICAD_SEXPR_PARSER::ParseSchematic( SCH_SHEET* aSheet, bool aIsCopya
     if( !schematic )
         THROW_PARSE_ERROR( _( "No schematic object" ), CurSource(), CurLine(), CurLineNumber(), CurOffset() );
 
-    // When loading the schematic, take a moment to cache the fonts so that the font
-    // picker can show the embedded fonts immediately.
-    std::vector<std::string> fontNames;
-    Fontconfig()->ListFonts( fontNames, std::string( Pgm().GetLanguageTag().utf8_str() ),
-                             schematic->GetEmbeddedFiles()->GetFontFiles(), true );
+    // Register embedded fonts for the font picker. Without embedded fonts the
+    // picker can enumerate system fonts on demand, once for the current language.
+    const auto* fontFiles = schematic->GetEmbeddedFiles()->GetFontFiles();
+
+    if( fontFiles && !fontFiles->empty() )
+    {
+        std::vector<std::string> fontNames;
+        Fontconfig()->ListFonts( fontNames, std::string( Pgm().GetLanguageTag().utf8_str() ),
+                                 fontFiles, true );
+    }
 
     if( m_requiredVersion < 20200828 )
         screen->SetLegacySymbolInstanceData();
